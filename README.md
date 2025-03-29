@@ -1,7 +1,7 @@
 # CS2ESP-external-cheat-python
 This is a simple and functional ESP (Extra Sensory Perception) cheat for CS2 that allows you to see enemies through walls. The cheat works only in windowed mode ("In the window" or "Fullscreen in the window") and includes a number of settings that can be changed.
 
-![2024-07-31_01-23-41](https://github.com/user-attachments/assets/d81cae98-fca5-4b30-8b28-51ab995a6935)
+![image](https://github.com/user-attachments/assets/685bb2ce-232a-4670-b1a5-aacb29a4e976)
 
 # To install:
 
