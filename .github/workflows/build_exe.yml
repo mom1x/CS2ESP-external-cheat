@@ -16,12 +16,24 @@ jobs:
 
     - name: Install dependencies
       run: |
-        pip install --upgrade pip
+        python -m pip install --upgrade pip
         pip install pyinstaller pymem pywin32 imgui glfw PyOpenGL requests
 
-    - name: Build with PyInstaller
+    - name: Build with PyInstaller (Smart Auto-Detect)
+      shell: powershell
       run: |
-        pyinstaller --noconfirm --onefile --console --name "ESP_Tester" main.py
+        # Ищем любой .py файл в корне, исключая конфигурационные файлы гитхаба
+        $pyFile = Get-ChildItem -Filter *.py | Select-Object -First 1
+        
+        if ($null -eq $pyFile) {
+            Write-Error "Критическая ошибка: В корне репозитория не найден ни один Python-скрипт (.py)!"
+            exit 1
+        }
+        
+        Write-Host "Обнаружен файл для сборки: $($pyFile.Name)"
+        
+        # Запуск сборки найденного файла
+        pyinstaller --noconfirm --onefile --console --name "ESP_Tester" $pyFile.Name
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
