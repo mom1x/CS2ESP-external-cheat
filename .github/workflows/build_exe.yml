@@ -1,42 +1,29 @@
-name: Build Windows EXE (CS2ESP)
+name: Build EXE
 
-on:
-  workflow_dispatch:   # ручной запуск
-  push:                # или автоматически при каждом пуше
+on: [push]
 
 jobs:
   build:
     runs-on: windows-latest
-
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-
-      - name: Setup Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'   # стабильная версия
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pyinstaller
-
-      # ----- Сборка с явным включением pymem -----
-      - name: Build EXE with PyInstaller
-        run: |
-          pyinstaller `
-            --onefile `
-            --windowed `
-            --name CS2ESP `
-            --collect-all pymem `
-            --hidden-import pymem.process `
-            CS2ESP.py
-
-      # ----- Публикация готового EXE -----
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: CS2ESP-external
-          path: dist/CS2ESP.exe
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+        
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        
+    - name: Build with PyInstaller
+      run: |
+        pyinstaller --noconfirm --onefile --windowed --name "ESP_Overlay" main.py
+        
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: Executable
+        path: dist/ESP_Overlay.exe
