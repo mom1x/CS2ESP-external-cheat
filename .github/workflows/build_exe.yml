@@ -19,21 +19,9 @@ jobs:
         python -m pip install --upgrade pip
         pip install pyinstaller pymem pywin32 imgui glfw PyOpenGL requests
 
-    - name: Build with PyInstaller (Fixed DLL Inclusion)
-      shell: powershell
+    - name: Build with PyInstaller (100% Stable CMD)
       run: |
-        # Автоматический поиск скрипта
-        $pyFile = Get-ChildItem -Filter *.py | Select-Object -First 1
-        
-        if ($null -eq $pyFile) {
-            Write-Error "Критическая ошибка: В корне репозитория не найден ни один Python-скрипт (.py)!"
-            exit 1
-        }
-        
-        Write-Host "Обнаружен файл для сборки: $($pyFile.Name)"
-        
-        # Сборка с принудительным включением данных и DLL библиотеки glfw
-        pyinstaller --noconfirm --onefile --console --collect-data glfw --name "ESP_Tester" $pyFile.Name
+        pyinstaller --noconfirm --onefile --console --collect-data glfw --collect-data imgui --name "ESP_Tester" CS2ESP.py
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
