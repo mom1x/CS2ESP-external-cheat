@@ -1,7 +1,7 @@
-  pymem
-   pywin32
-   imgui
-   glfw
-   PyOpenGL
-   requests
-   pyinstaller
+pymem
+pywin32
+imgui
+glfw
+PyOpenGL
+requests
+pyinstaller
