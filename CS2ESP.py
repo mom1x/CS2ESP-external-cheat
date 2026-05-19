@@ -12,30 +12,34 @@ import json
 WINDOW_WIDTH = 1920
 WINDOW_HEIGHT = 1080
 
-print("[ * ] Запуск оверлея...")
+print("[ * ] Запуск инициализации оверлея...")
 
-# Пути к внешней папке offsets рядом с .exe
+# Находим путь к папкеoffsets прямо рядом с запущенным файлом программы
 exe_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
 local_offsets_path = os.path.join(exe_dir, 'offsets', 'offsets.json')
 local_client_path = os.path.join(exe_dir, 'offsets', 'client_dll.json')
 
-# Загрузка оффсетов
+# Шаг 1: Проверяем наличие внешней папки с пользовательскими оффсетами
 try:
     if os.path.exists(local_offsets_path) and os.path.exists(local_client_path):
         with open(local_offsets_path, 'r', encoding='utf-8') as f:
             offsets = json.load(f)
         with open(local_client_path, 'r', encoding='utf-8') as f:
             client_dll = json.load(f)
-        print("[ + ] Оффсеты загружены из внешней папки offsets!")
+        print("[ + ] Оффсеты успешно загружены из ВНЕШНЕЙ папки offsets!")
     else:
+        # Если папки нет, берем оригинальные ссылки из репозитория
+        print("[ * ] Внешняя папка offsets не найдена. Загружаем оригинальные ссылки...")
         offsets = requests.get('https://raw.githubusercontent.com/a2x/cs2-dumper/main/output/offsets.json').json()
         client_dll = requests.get('https://raw.githubusercontent.com/a2x/cs2-dumper/main/output/client_dll.json').json()
-        print("[ + ] Локальных файлов нет. Оффсеты загружены из интернета.")
+        print("[ + ] Оффсеты успешно получены из сети.")
 except Exception as e:
+    # Защитный резервный случай на случай сбоя сети или файлов
+    print(f"[ ! ] Ошибка при чтении файлов: {e}. Применяются резервные интернет-ссылки.")
     offsets = requests.get('https://raw.githubusercontent.com/a2x/cs2-dumper/main/output/offsets.json').json()
     client_dll = requests.get('https://raw.githubusercontent.com/a2x/cs2-dumper/main/output/client_dll.json').json()
-    print("[ ! ] Ошибка папки, применены интернет-ссылки.")
 
+# Инициализация смещений из структуры JSON
 dwEntityList = offsets['client.dll']['dwEntityList']
 dwLocalPlayerPawn = offsets['client.dll']['dwLocalPlayerPawn']
 dwViewMatrix = offsets['client.dll']['dwViewMatrix']
@@ -47,7 +51,7 @@ m_modelState = client_dll['client.dll']['classes']['CSkeletonInstance']['fields'
 m_hPlayerPawn = client_dll['client.dll']['classes']['CCSPlayerController']['fields']['m_hPlayerPawn']
 m_iHealth = client_dll['client.dll']['classes']['C_BaseEntity']['fields']['m_iHealth']
 
-print("[ * ] Ожидание CS2...")
+print("[ * ] Ожидание запуска процесса cs2.exe...")
 while True:
     time.sleep(1)
     try:
@@ -57,7 +61,7 @@ while True:
     except:
         pass
 
-print("[ + ] CS2 обнаружена!")
+print("[ + ] Процесс cs2.exe успешно обнаружен!")
 time.sleep(1)
 os.system("cls")
 
@@ -78,15 +82,20 @@ def w2s(mtx, posx, posy, posz, width, height):
 
 def esp(draw_list):
     try:
+        # Чтение матрицы вида игрока
         view_matrix = [pm.read_float(client + dwViewMatrix + i * 4) for i in range(16)]
+
+        # Получаем структуру локального игрока
         local_player = pm.read_longlong(client + dwLocalPlayerPawn)
-        if not local_player: return
+        if not local_player: 
+            return
         
         try:
             local_team = pm.read_int(local_player + m_iTeamNum)
         except:
             return
 
+        # Основной цикл перебора сущностей (64 слота)
         for i in range(64):
             try:
                 entity = pm.read_longlong(client + dwEntityList)
@@ -107,46 +116,57 @@ def esp(draw_list):
                 entity_pawn = pm.read_longlong(list_entry + (120) * (entity_controller_pawn & 0x1FF))
                 if not entity_pawn or entity_pawn == local_player: continue
 
-                # ИСПРАВЛЕНИЕ: В новой CS2 живой игрок = 0 (раньше было 256)
+                # ИСПРАВЛЕНИЕ: В актуальной версии CS2 живой игрок = 0 (вместо старого 256)
                 if pm.read_int(entity_pawn + m_lifeState) != 0:
                     continue
 
+                # Пропускаем союзников по команде
                 if pm.read_int(entity_pawn + m_iTeamNum) == local_team:
                     continue
 
+                # Чтение узлов игровой сцены персонажа и матрицы костей
                 game_scene = pm.read_longlong(entity_pawn + m_pGameSceneNode)
                 if not game_scene: continue
                 
                 bone_matrix = pm.read_longlong(game_scene + m_modelState + 0x80)
                 if not bone_matrix: continue
 
+                # Координаты головы в 3D
                 headX = pm.read_float(bone_matrix + 6 * 0x20)
                 headY = pm.read_float(bone_matrix + 6 * 0x20 + 0x4)
                 headZ = pm.read_float(bone_matrix + 6 * 0x20 + 0x8) + 8
                 head_pos = w2s(view_matrix, headX, headY, headZ, WINDOW_WIDTH, WINDOW_HEIGHT)
 
+                # Координаты ног в 3D
                 legZ = pm.read_float(bone_matrix + 28 * 0x20 + 0x8)
                 leg_pos = w2s(view_matrix, headX, headY, legZ, WINDOW_WIDTH, WINDOW_HEIGHT)
 
+                # Если игрок вне зоны видимости экрана, пропускаем отрисовку коробки
                 if head_pos[0] == -999 or leg_pos[0] == -999: continue
 
+                # Расчет размеров 2D бокса на экране
                 delta = abs(head_pos[1] - leg_pos[1])
                 leftX = head_pos[0] - delta // 3
                 rightX = head_pos[0] + delta // 3
 
-                color = imgui.get_color_u32_rgba(1, 0, 0, 1) # Красный цвет
+                # Установка цвета (Красный)
+                color = imgui.get_color_u32_rgba(1, 0, 0, 1)
 
+                # Отрисовка линий прямоугольника вокруг врага
                 draw_list.add_line(leftX, leg_pos[1], rightX, leg_pos[1], color, 2.0)
                 draw_list.add_line(leftX, leg_pos[1], leftX, head_pos[1], color, 2.0)
                 draw_list.add_line(rightX, leg_pos[1], rightX, head_pos[1], color, 2.0)
                 draw_list.add_line(leftX, head_pos[1], rightX, head_pos[1], color, 2.0)
 
+                # Чтение текущего здоровья (HP) врага
                 entity_hp = pm.read_int(entity_pawn + m_iHealth)
                 draw_list.add_text(leftX - 25, head_pos[1] - 5, color, str(entity_hp))
 
             except:
+                # Ошибка чтения конкретного энтити гасится, чтобы не ломать поток
                 continue
     except:
+        # Защита от общей ошибки чтения памяти 998
         pass
 
 def main():
@@ -170,7 +190,7 @@ def main():
     imgui.create_context()
     impl = GlfwRenderer(window)
 
-    print("[ + ] Оверлей успешно отрисован. Приятной игры!")
+    print("[ + ] Прозрачный оверлей успешно отрисован поверх окон!")
 
     while not glfw.window_should_close(window):
         glfw.poll_events()
