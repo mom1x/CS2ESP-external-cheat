@@ -19,10 +19,10 @@ jobs:
         python -m pip install --upgrade pip
         pip install pyinstaller pymem pywin32 imgui glfw PyOpenGL requests
 
-    - name: Build with PyInstaller (Smart Auto-Detect)
+    - name: Build with PyInstaller (Fixed DLL Inclusion)
       shell: powershell
       run: |
-        # Ищем любой .py файл в корне, исключая конфигурационные файлы гитхаба
+        # Автоматический поиск скрипта
         $pyFile = Get-ChildItem -Filter *.py | Select-Object -First 1
         
         if ($null -eq $pyFile) {
@@ -32,8 +32,8 @@ jobs:
         
         Write-Host "Обнаружен файл для сборки: $($pyFile.Name)"
         
-        # Запуск сборки найденного файла
-        pyinstaller --noconfirm --onefile --console --name "ESP_Tester" $pyFile.Name
+        # Сборка с принудительным включением данных и DLL библиотеки glfw
+        pyinstaller --noconfirm --onefile --console --collect-data glfw --name "ESP_Tester" $pyFile.Name
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
