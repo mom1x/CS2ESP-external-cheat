@@ -1,4 +1,4 @@
-name: Buildd EXE
+name: Build EXE
 
 on: [push]
 
@@ -18,9 +18,21 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
         
-    - name: Build with PyInstaller
+    - name: Dynamic Build with PyInstaller
+      shell: powershell
       run: |
-        pyinstaller --noconfirm --onefile --windowed --name "ESP_Overlay" main.py
+        # Ищем любой .py файл в корне, кроме конфигурационных
+        $pyFile = Get-ChildItem -Filter *.py | Where-Object { $_.Name -notmatch "setup|settings" } | Select-Object -First 1
+        
+        if ($null -eq $pyFile) {
+            Write-Error "Критическая ошибка: В корне репозитория не найден ни один Python-скрипт (.py)!"
+            exit 1
+        }
+        
+        Write-Host "Найден файл для сборки: $($pyFile.Name)"
+        
+        # Запускаем сборку найденного файла
+        pyinstaller --noconfirm --onefile --windowed --name "ESP_Overlay" $pyFile.Name
         
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
