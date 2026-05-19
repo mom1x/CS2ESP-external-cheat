@@ -1,18 +1,40 @@
 import pymem
 import pymem.process
 import win32gui, win32con
-import time, os
+import time, os, sys
 import imgui
 from imgui.integrations.glfw import GlfwRenderer
 import glfw
 import OpenGL.GL as gl
 import requests
+import json
 
 WINDOW_WIDTH = 1920
 WINDOW_HEIGHT = 1080
 
-offsets = requests.get('https://raw.githubusercontent.com/a2x/cs2-dumper/main/output/offsets.json').json()
-client_dll = requests.get('https://raw.githubusercontent.com/a2x/cs2-dumper/main/output/client_dll.json').json()
+# Определяем путь к папке offsets рядом с запущенным .exe файлом
+exe_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
+local_offsets_path = os.path.join(exe_dir, 'offsets', 'offsets.json')
+local_client_path = os.path.join(exe_dir, 'offsets', 'client_dll.json')
+
+# Проверка внешней папки пользовательских оффсетов
+try:
+    if os.path.exists(local_offsets_path) and os.path.exists(local_client_path):
+        with open(local_offsets_path, 'r', encoding='utf-8') as f:
+            offsets = json.load(f)
+        with open(local_client_path, 'r', encoding='utf-8') as f:
+            client_dll = json.load(f)
+        print("Оффсеты успешно загружены из ВНЕШНЕЙ папки offsets!")
+    else:
+        # Если папки или файлов рядом нет, работаем по оригинальным ссылкам
+        offsets = requests.get('https://raw.githubusercontent.com/a2x/cs2-dumper/main/output/offsets.json').json()
+        client_dll = requests.get('https://raw.githubusercontent.com/a2x/cs2-dumper/main/output/client_dll.json').json()
+        print("Внешняя папка offsets не найдена. Оффсеты загружены по оригинальным ссылкам.")
+except Exception as e:
+    # Резервный случай подстраховки оригинальными ссылками
+    offsets = requests.get('https://raw.githubusercontent.com/a2x/cs2-dumper/main/output/offsets.json').json()
+    client_dll = requests.get('https://raw.githubusercontent.com/a2x/cs2-dumper/main/output/client_dll.json').json()
+    print("Ошибка чтения внешних файлов, применены оригинальные ссылки.")
 
 dwEntityList = offsets['client.dll']['dwEntityList']
 dwLocalPlayerPawn = offsets['client.dll']['dwLocalPlayerPawn']
@@ -125,16 +147,15 @@ def esp(draw_list):
             rightX = head_pos[0] + delta // 3
 
             # Линии бокса
-            draw_list.add_line(leftX,  leg_pos[1],  rightX, leg_pos[1],  color, 2.0)
-            draw_list.add_line(leftX,  leg_pos[1],  leftX,  head_pos[1], color, 2.0)
-            draw_list.add_line(rightX, leg_pos[1],  rightX, head_pos[1], color, 2.0)
-            draw_list.add_line(leftX,  head_pos[1], rightX, head_pos[1], color, 2.0)
+            draw_list.add_line(leftX, leg_pos[1], rightX, leg_pos[1], color, 2.0)
+            draw_list.add_line(leftX, leg_pos[1], leftX, head_pos[1], color, 2.0)
+            draw_list.add_line(rightX, leg_pos[1], rightX, head_pos[1], color, 2.0)
+            draw_list.add_line(leftX, head_pos[1], rightX, head_pos[1], color, 2.0)
 
             # Читаем HP
             entity_hp = pm.read_int(entity_pawn + m_iHealth)
 
             # Выводим HP слева вверху от бокса
-            # Слегка сместим на 25 пикселей влево и 5 пикселей вверх
             draw_list.add_text(leftX - 25, head_pos[1] - 5, color, str(entity_hp))
 
         except:
