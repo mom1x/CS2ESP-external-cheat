@@ -1,8 +1,8 @@
-name: Build Windows EXE
+name: Build Windows EXE (CS2ESP)
 
 on:
-  workflow_dispatch:   # позволяет запускать вручную
-  push:                # или при каждом пуше (можешь удалить эту строку, если не нужно)
+  workflow_dispatch:   # ручной запуск
+  push:                # или автоматически при каждом пуше
 
 jobs:
   build:
@@ -15,7 +15,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.11'
+          python-version: '3.11'   # стабильная версия
 
       - name: Install dependencies
         run: |
@@ -23,11 +23,19 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
-      - name: Build with PyInstaller
+      # ----- Сборка с явным включением pymem -----
+      - name: Build EXE with PyInstaller
         run: |
-          pyinstaller --onefile --windowed --name CS2ESP CS2ESP.py
+          pyinstaller `
+            --onefile `
+            --windowed `
+            --name CS2ESP `
+            --collect-all pymem `
+            --hidden-import pymem.process `
+            CS2ESP.py
 
-      - name: Upload EXE as artifact
+      # ----- Публикация готового EXE -----
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: CS2ESP-external
