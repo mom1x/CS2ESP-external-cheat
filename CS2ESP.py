@@ -7,25 +7,33 @@ from imgui.integrations.glfw import GlfwRenderer
 import glfw
 import OpenGL.GL as gl
 import requests
+import json
 
 WINDOW_WIDTH = 1920
 WINDOW_HEIGHT = 1080
 
-offsets = requests.get('https://raw.githubusercontent.com/a2x/cs2-dumper/main/output/offsets.json').json()
-client_dll = requests.get('https://raw.githubusercontent.com/a2x/cs2-dumper/main/output/client_dll.json').json()
+# Безопасное получение оффсетов с проверкой сети
+try:
+    offsets = requests.get('https://raw.githubusercontent.com/a2x/cs2-dumper/main/output/offsets.json').json()
+    client_dll = requests.get('https://raw.githubusercontent.com/a2x/cs2-dumper/main/output/client_dll.json').json()
 
-dwEntityList = offsets['client.dll']['dwEntityList']
-dwLocalPlayerPawn = offsets['client.dll']['dwLocalPlayerPawn']
-dwViewMatrix = offsets['client.dll']['dwViewMatrix']
+    dwEntityList = offsets['client.dll']['dwEntityList']
+    dwLocalPlayerPawn = offsets['client.dll']['dwLocalPlayerPawn']
+    dwViewMatrix = offsets['client.dll']['dwViewMatrix']
 
-m_iTeamNum = client_dll['client.dll']['classes']['C_BaseEntity']['fields']['m_iTeamNum']
-m_lifeState = client_dll['client.dll']['classes']['C_BaseEntity']['fields']['m_lifeState']
-m_pGameSceneNode = client_dll['client.dll']['classes']['C_BaseEntity']['fields']['m_pGameSceneNode']
-m_modelState = client_dll['client.dll']['classes']['CSkeletonInstance']['fields']['m_modelState']
-m_hPlayerPawn = client_dll['client.dll']['classes']['CCSPlayerController']['fields']['m_hPlayerPawn']
-m_iHealth = client_dll['client.dll']['classes']['C_BaseEntity']['fields']['m_iHealth']
+    m_iTeamNum = client_dll['client.dll']['classes']['C_BaseEntity']['fields']['m_iTeamNum']
+    m_lifeState = client_dll['client.dll']['classes']['C_BaseEntity']['fields']['m_lifeState']
+    m_pGameSceneNode = client_dll['client.dll']['classes']['C_BaseEntity']['fields']['m_pGameSceneNode']
+    m_modelState = client_dll['client.dll']['classes']['CSkeletonInstance']['fields']['m_modelState']
+    m_hPlayerPawn = client_dll['client.dll']['classes']['CCSPlayerController']['fields']['m_hPlayerPawn']
+    m_iHealth = client_dll['client.dll']['classes']['C_BaseEntity']['fields']['m_iHealth']
+except Exception as e:
+    print(f"Ошибка загрузки оффсетов: {e}")
+    time.sleep(5)
+    exit(1)
 
 # Ожидаем запуска cs2.exe
+print("Ожидание запуска cs2.exe...")
 while True:
     time.sleep(1)
     try:
@@ -37,9 +45,16 @@ while True:
 
 time.sleep(1)
 os.system("cls")
+print("CS2 обнаружена. Запуск оверлея...")
 
-pm = pymem.Pymem("cs2.exe")
-client = pymem.process.module_from_name(pm.process_handle, "client.dll").lpBaseOfDll
+# Функция безопасного чтения памяти
+def safe_read(func, address, *args):
+    if address <= 0 or address > 0x7FFFFFFFFFFFFFFF: # Проверка на безумные/отрицательные адреса
+        return None
+    try:
+        return func(address, *args)
+    except:
+        return None
 
 def w2s(mtx, posx, posy, posz, width, height):
     screenW = mtx[12]*posx + mtx[13]*posy + mtx[14]*posz + mtx[15]
@@ -54,59 +69,68 @@ def w2s(mtx, posx, posy, posz, width, height):
     return [-999, -999]
 
 def esp(draw_list):
-    # Считываем view matrix
-    view_matrix = [pm.read_float(client + dwViewMatrix + i * 4) for i in range(16)]
+    # Считываем view matrix безопасно
+    try:
+        view_matrix = [pm.read_float(client + dwViewMatrix + i * 4) for i in range(16)]
+    except:
+        return
 
     # Получаем локального игрока и его команду
-    local_player = pm.read_longlong(client + dwLocalPlayerPawn)
-    try:
-        local_team = pm.read_int(local_player + m_iTeamNum)
-    except:
+    local_player = safe_read(pm.read_longlong, client + dwLocalPlayerPawn)
+    if not local_player:
+        return
+
+    local_team = safe_read(pm.read_int, local_player + m_iTeamNum)
+    if local_team is None:
         return
 
     # Перебираем возможные слоты сущностей
     for i in range(64):
-        entity = pm.read_longlong(client + dwEntityList)
+        entity = safe_read(pm.read_longlong, client + dwEntityList)
         if not entity:
             continue
 
         # Находим адрес entity_controller
-        list_entry = pm.read_longlong(entity + ((8 * (i & 0x7FFF) >> 9) + 16))
+        list_entry = safe_read(pm.read_longlong, entity + ((8 * (i & 0x7FFF) >> 9) + 16))
         if not list_entry:
             continue
 
-        entity_controller = pm.read_longlong(list_entry + (120) * (i & 0x1FF))
+        entity_controller = safe_read(pm.read_longlong, list_entry + 120 * (i & 0x1FF))
         if not entity_controller:
             continue
 
         # Получаем pawn из контроллера
-        entity_controller_pawn = pm.read_longlong(entity_controller + m_hPlayerPawn)
+        entity_controller_pawn = safe_read(pm.read_longlong, entity_controller + m_hPlayerPawn)
         if not entity_controller_pawn:
             continue
 
         # Достаем сам pawn
-        list_entry = pm.read_longlong(entity + (0x8 * ((entity_controller_pawn & 0x7FFF) >> 9) + 16))
-        if not list_entry:
+        list_entry2 = safe_read(pm.read_longlong, entity + (0x8 * ((entity_controller_pawn & 0x7FFF) >> 9) + 16))
+        if not list_entry2:
             continue
 
-        entity_pawn = pm.read_longlong(list_entry + (120) * (entity_controller_pawn & 0x1FF))
+        entity_pawn = safe_read(pm.read_longlong, list_entry2 + 120 * (entity_controller_pawn & 0x1FF))
         if not entity_pawn or entity_pawn == local_player:
             continue
 
         # Проверяем жив ли (lifeState == 256)
-        if pm.read_int(entity_pawn + m_lifeState) != 256:
+        pawn_life = safe_read(pm.read_int, entity_pawn + m_lifeState)
+        if pawn_life != 256:
             continue
 
         # Пропускаем тиммейтов
-        if pm.read_int(entity_pawn + m_iTeamNum) == local_team:
+        pawn_team = safe_read(pm.read_int, entity_pawn + m_iTeamNum)
+        if pawn_team == local_team:
             continue
 
-        # Цвет бокса
-        color = imgui.get_color_u32_rgba(1, 0, 0, 1)
-
         # Достаем указатель на матрицу костей
-        game_scene = pm.read_longlong(entity_pawn + m_pGameSceneNode)
-        bone_matrix = pm.read_longlong(game_scene + m_modelState + 0x80)
+        game_scene = safe_read(pm.read_longlong, entity_pawn + m_pGameSceneNode)
+        if not game_scene:
+            continue
+
+        bone_matrix = safe_read(pm.read_longlong, game_scene + m_modelState + 0x80)
+        if not bone_matrix:
+            continue
 
         try:
             # Координаты головы
@@ -119,29 +143,31 @@ def esp(draw_list):
             legZ = pm.read_float(bone_matrix + 28 * 0x20 + 0x8)
             leg_pos = w2s(view_matrix, headX, headY, legZ, WINDOW_WIDTH, WINDOW_HEIGHT)
 
+            if head_pos[0] == -999 or leg_pos[0] == -999:
+                continue
+
+            # Цвет бокса
+            color = imgui.get_color_u32_rgba(1, 0, 0, 1)
+
             # Рисуем бокс
             delta = abs(head_pos[1] - leg_pos[1])
             leftX = head_pos[0] - delta // 3
             rightX = head_pos[0] + delta // 3
 
             # Линии бокса
-            draw_list.add_line(leftX,  leg_pos[1],  rightX, leg_pos[1],  color, 2.0)
-            draw_list.add_line(leftX,  leg_pos[1],  leftX,  head_pos[1], color, 2.0)
-            draw_list.add_line(rightX, leg_pos[1],  rightX, head_pos[1], color, 2.0)
-            draw_list.add_line(leftX,  head_pos[1], rightX, head_pos[1], color, 2.0)
+            draw_list.add_line(leftX, leg_pos[1], rightX, leg_pos[1], color, 2.0)
+            draw_list.add_line(leftX, leg_pos[1], leftX, head_pos[1], color, 2.0)
+            draw_list.add_line(rightX, leg_pos[1], rightX, head_pos[1], color, 2.0)
+            draw_list.add_line(leftX, head_pos[1], rightX, head_pos[1], color, 2.0)
 
             # Читаем HP
-            entity_hp = pm.read_int(entity_pawn + m_iHealth)
-
-            # Выводим HP слева вверху от бокса
-            # Слегка сместим на 25 пикселей влево и 5 пикселей вверх
-            draw_list.add_text(leftX - 25, head_pos[1] - 5, color, str(entity_hp))
-
+            entity_hp = safe_read(pm.read_int, entity_pawn + m_iHealth)
+            if entity_hp is not None:
+                draw_list.add_text(leftX - 25, head_pos[1] - 5, color, str(entity_hp))
         except:
             continue
 
 def main():
-    # Инициализация glfw
     glfw.init()
     glfw.window_hint(glfw.TRANSPARENT_FRAMEBUFFER, glfw.TRUE)
     window = glfw.create_window(WINDOW_WIDTH, WINDOW_HEIGHT, "overlay", None, None)
@@ -159,7 +185,6 @@ def main():
     imgui.create_context()
     impl = GlfwRenderer(window)
 
-    # Основной цикл
     while not glfw.window_should_close(window):
         glfw.poll_events()
         impl.process_inputs()
