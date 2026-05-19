@@ -18,12 +18,21 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
         
-    - name: Dynamic Build with PyInstaller and GLFW Fix
+    - name: Ultimate Build with PyInstaller
       shell: powershell
       run: |
+        # Автоматический поиск твоего главного скрипта на сервере
         $pyFile = Get-ChildItem -Filter *.py | Where-Object { $_.Name -notmatch "setup|settings" } | Select-Object -First 1
-        if ($null -eq $pyFile) { exit 1 }
-        pyinstaller --noconfirm --onefile --windowed --collect-dynamic-libs=glfw --name=ESP_Overlay $pyFile.Name
+        
+        if ($null -eq $pyFile) {
+            Write-Error "Критическая ошибка: В корне репозитория не найден Python-скрипт!"
+            exit 1
+        }
+        
+        Write-Host "Успешно нашли файл для сборки: $($pyFile.Name)"
+        
+        # --collect-all glfw на 100% забирает все dll файлы библиотеки glfw внутрь одного exe
+        pyinstaller --noconfirm --onefile --windowed --collect-all glfw --name "ESP_Overlay" $pyFile.Name
         
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
