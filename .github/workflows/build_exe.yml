@@ -1,4 +1,4 @@
-name: Build CS2ESP to EXE
+name: Build CS2ESP to EXE (No Admin)
 
 on:
   workflow_dispatch:
@@ -34,7 +34,6 @@ jobs:
         $url = "https://github.com/glfw/glfw/releases/download/3.4/glfw-3.4.bin.WIN64.zip"
         Invoke-WebRequest -Uri $url -OutFile glfw.zip
         Expand-Archive glfw.zip -DestinationPath glfw_extracted
-        # Копируем нужную dll в корень проекта
         Copy-Item "glfw_extracted\glfw-3.4.bin.WIN64\lib-vc2022\glfw3.dll" -Destination "glfw3.dll"
         Write-Host "glfw3.dll placed in root."
 
@@ -44,7 +43,7 @@ jobs:
         pip install -r requirements.txt
         pip install pyinstaller
 
-    - name: Build EXE with PyInstaller (with GLFW DLL)
+    - name: Build EXE with PyInstaller (No admin)
       run: |
         pyinstaller --onefile --windowed --name CS2ESP --add-binary "glfw3.dll;." CS2ESP.py
 
