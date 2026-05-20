@@ -20,6 +20,8 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
         pip install pyinstaller
+        # Проверка установки
+        python -c "import requests; import pymem; print('Dependencies installed successfully')"
 
     - name: Download GLFW3 DLL
       run: |
@@ -29,7 +31,12 @@ jobs:
 
     - name: Build EXE
       run: |
-        pyinstaller --onefile --windowed --name CS2ESP --add-binary "glfw3.dll;." launcher.py
+        pyinstaller --onefile --windowed ^
+        --name CS2ESP ^
+        --hidden-import=requests ^
+        --hidden-import=pymem ^
+        --add-binary "glfw3.dll;." ^
+        launcher.py
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
