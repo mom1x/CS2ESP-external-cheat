@@ -1,6 +1,6 @@
 pymem
-win32
-glfw
-imgui[full]
-PyOpenGL
 requests
+imgui[full]
+glfw
+PyOpenGL
+pywin32
