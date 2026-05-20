@@ -5,11 +5,10 @@ import time
 import ctypes
 import struct
 import warnings
-import urllib.request  # Для автоматического обновления оффсетов
 
 warnings.filterwarnings("ignore", category=UserWarning, module='OpenGL')
 
-# === НАСТРОЙКА DPI И ОКНА ===
+# === НАСТРОЙКИ СРЕДЫ WINDOWS ===
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(2)
 except:
@@ -33,90 +32,101 @@ import win32api
 import win32gui
 import win32con
 
+# Win32 API структуры и функции для прямого чтения (User-Mode Bypass)
+OpenProcess = ctypes.windll.kernel32.OpenProcess
+ReadProcessMemory = ctypes.windll.kernel32.ReadProcessMemory
+CloseHandle = ctypes.windll.kernel32.CloseHandle
+
 class MARGINS(ctypes.Structure):
     _fields_ = [("cxLeftWidth", ctypes.c_int), ("cxRightWidth", ctypes.c_int),
                 ("cyTopHeight", ctypes.c_int), ("cyBottomHeight", ctypes.c_int)]
 
-# ==============================================================================
-# АВТОМАТИЧЕСКИЙ ДИНАМИЧЕСКИЙ ОБНОВЛЯТОР ОФФСЕТОВ (Через актуальные репозитории)
-# ==============================================================================
-def fetch_live_offsets():
-    """
-    Загружает свежие оффсеты напрямую из регулярно обновляемых дамперов сообщества.
-    Это гарантирует работоспособность после патчей игры.
-    """
-    print("[SYSTEM] Fetching actual offsets from public repository...")
-    base_conf = {
-        "dwEntityList": 0x18C2DB8, 
-        "dwViewMatrix": 0x19242A0, 
-        "dwLocalPlayerPawn": 0x1823A08,
-        "m_iHealth": 0x32C, 
-        "m_hPlayerPawn": 0x7BC, 
-        "m_vOldOrigin": 0x1274, 
-        "m_iTeamNum": 0x3BF
+# ==========================================
+# ЧЕТКАЯ ЗАГРУЗКА ИЗ ВАШЕЙ ПАПКИ OFFSETS
+# ==========================================
+def load_offsets():
+    conf = {
+        "dwEntityList": 0, "dwViewMatrix": 0, "dwLocalPlayerPawn": 0,
+        "m_iHealth": 0, "m_hPlayerPawn": 0, "m_vOldOrigin": 0, "m_iTeamNum": 0
     }
     
-    try:
-        # Используем доверенные JSON дампы, обновляемые автоматически каждым патчем CS2
-        offsets_url = "https://raw.githubusercontent.com/a2x/cs2-dumper/main/output/offsets.json"
-        client_url = "https://raw.githubusercontent.com/a2x/cs2-dumper/main/output/client_dll.json"
+    # Ищем папку offsets рядом со скриптом
+    root = os.path.dirname(os.path.abspath(__file__))
+    offsets_path = os.path.join(root, "offsets", "offsets.json")
+    client_dll_path = os.path.join(root, "offsets", "client_dll.json")
+
+    if os.path.exists(offsets_path) and os.path.exists(client_dll_path):
+        try:
+            with open(offsets_path, "r") as f:
+                raw_offsets = json.load(f)["client.dll"]
+            with open(client_dll_path, "r") as f:
+                raw_classes = json.load(f)["client.dll"]["classes"]
+
+            conf["dwEntityList"] = raw_offsets.get("dwEntityList", 0)
+            conf["dwViewMatrix"] = raw_offsets.get("dwViewMatrix", 0)
+            conf["dwLocalPlayerPawn"] = raw_offsets.get("dwLocalPlayerPawn", 0)
+
+            def parse_val(d): return d.get("value", d.get("offset", 0)) if isinstance(d, dict) else d
+
+            for cls in ["C_BaseEntity", "C_BasePlayerPawn", "CCSPlayerController", "C_CSPlayerPawnBase"]:
+                if cls in raw_classes:
+                    fields = raw_classes[cls].get("fields", {})
+                    if "m_iHealth" in fields: conf["m_iHealth"] = parse_val(fields["m_iHealth"])
+                    if "m_hPlayerPawn" in fields: conf["m_hPlayerPawn"] = parse_val(fields["m_hPlayerPawn"])
+                    if "m_vOldOrigin" in fields: conf["m_vOldOrigin"] = parse_val(fields["m_vOldOrigin"])
+                    if "m_iTeamNum" in fields: conf["m_iTeamNum"] = parse_val(fields["m_iTeamNum"])
+            print("[OK] Offsets loaded successfully from local files.")
+        except Exception as e:
+            print(f"[ERROR] Failed to parse JSON offsets: {e}")
+    else:
+        print("[WARNING] Local offsets folder not found! Put 'offsets' directory near the script.")
         
-        req_offsets = urllib.request.urlopen(offsets_url, timeout=5)
-        req_client = urllib.request.urlopen(client_url, timeout=5)
-        
-        offsets_data = json.loads(req_offsets.read().decode())["client.dll"]
-        client_data = json.loads(req_client.read().decode())["client.dll"]["classes"]
-        
-        # Обновляем базовые адреса
-        base_conf["dwEntityList"] = offsets_data.get("dwEntityList", base_conf["dwEntityList"])
-        base_conf["dwViewMatrix"] = offsets_data.get("dwViewMatrix", base_conf["dwViewMatrix"])
-        base_conf["dwLocalPlayerPawn"] = offsets_data.get("dwLocalPlayerPawn", base_conf["dwLocalPlayerPawn"])
-        
-        # Обновляем смещения классов
-        fields = client_data.get("C_BaseEntity", {}).get("fields", {})
-        if "m_iHealth" in fields: base_conf["m_iHealth"] = fields["m_iHealth"]
-        
-        pawn_fields = client_data.get("C_BasePlayerPawn", {}).get("fields", {})
-        if "m_vOldOrigin" in pawn_fields: base_conf["m_vOldOrigin"] = pawn_fields["m_vOldOrigin"]
-        if "m_iTeamNum" in pawn_fields: base_conf["m_iTeamNum"] = pawn_fields["m_iTeamNum"]
-        
-        controller_fields = client_data.get("CCSPlayerController", {}).get("fields", {})
-        if "m_hPlayerPawn" in controller_fields: base_conf["m_hPlayerPawn"] = controller_fields["m_hPlayerPawn"]
-        
-        print("[SYSTEM] Offsets successfully synchronized with live servers.")
-    except Exception as e:
-        print(f"[WARNING] Cloud sync failed ({e}). Using hardcoded fallbacks.")
-        
-    return base_conf
+    return conf
+
+# ==========================================
+# КОРРЕТНЫЕ СИС-ВЫЗОВЫ ДЛЯ USER-MODE ЧТЕНИЯ
+# ==========================================
+def read_raw(handle, address, size):
+    """Прямое чтение памяти без использования оберток Pymem (стабильнее без UAC)"""
+    buffer = ctypes.create_string_buffer(size)
+    bytes_read = ctypes.c_size_t()
+    if ReadProcessMemory(handle, ctypes.c_void_p(address), buffer, size, ctypes.byref(bytes_read)):
+        return buffer.raw
+    return None
+
+def read_int(handle, address):
+    res = read_raw(handle, address, 4)
+    return struct.unpack('i', res)[0] if res else 0
+
+def read_uint(handle, address):
+    res = read_raw(handle, address, 4)
+    return struct.unpack('I', res)[0] if res else 0
+
+def read_longlong(handle, address):
+    res = read_raw(handle, address, 8)
+    return struct.unpack('q', res)[0] if res else 0
 
 def world_to_screen(pos, matrix, width, height):
     w = matrix[12] * pos[0] + matrix[13] * pos[1] + matrix[14] * pos[2] + matrix[15]
     if w < 0.01: return None
-    
     x = matrix[0] * pos[0] + matrix[1] * pos[1] + matrix[2] * pos[2] + matrix[3]
     y = matrix[4] * pos[0] + matrix[5] * pos[1] + matrix[6] * pos[2] + matrix[7]
-    
-    screen_x = (width / 2) + (x / w) * (width / 2)
-    screen_y = (height / 2) - (y / w) * (height / 2)
-    return screen_x, screen_y
+    return (width / 2) + (x / w) * (width / 2), (height / 2) - (y / w) * (height / 2)
 
 def init_overlay():
     if not glfw.init(): return None
-    
     glfw.window_hint(glfw.FLOATING, glfw.TRUE)
     glfw.window_hint(glfw.DECORATED, glfw.FALSE)
     glfw.window_hint(glfw.TRANSPARENT_FRAMEBUFFER, glfw.TRUE)
     glfw.window_hint(glfw.MOUSE_PASSTHROUGH, glfw.TRUE)
 
-    screen_w = win32api.GetSystemMetrics(0)
-    screen_h = win32api.GetSystemMetrics(1)
+    screen_w, screen_h = win32api.GetSystemMetrics(0), win32api.GetSystemMetrics(1)
     if screen_w == 0 or screen_h == 0: screen_w, screen_h = 1920, 1080
 
-    window = glfw.create_window(screen_w, screen_h, "CS2_OVERLAY_UM", None, None)
+    window = glfw.create_window(screen_w, screen_h, "CS2_OVERLAY_STABLE", None, None)
     if not window:
         glfw.terminate()
         return None
-        
     glfw.make_context_current(window)
     glfw.swap_interval(1)
     
@@ -136,18 +146,16 @@ def init_overlay():
     return window, renderer, hwnd, screen_w, screen_h
 
 def main():
-    # Инициализируем оффсеты из сети
-    conf = fetch_live_offsets()
-    pm = pymem.Pymem()
+    conf = load_offsets()
+    process_handle = None
     client_dll = None
     
     window, renderer, hwnd, screen_w, screen_h = init_overlay()
     if not window: return
 
-    # Использование флага стандартного доступа уровня пользователя
-    PROCESS_ALL_ACCESS = 0x001F0FFF
+    # Комбинация флагов для гарантированного доступа из-под обычного пользователя
     PROCESS_VM_READ = 0x0010
-    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000 # Позволяет видеть процесс без UAC прав
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
     
     last_topmost_check = time.time()
     
@@ -155,7 +163,7 @@ def main():
         glfw.poll_events()
         renderer.process_inputs()
         
-        if time.time() - last_topmost_check > 0.8:
+        if time.time() - last_topmost_check > 1.0:
             win32gui.SetWindowPos(hwnd, win32con.HWND_TOPMOST, 0, 0, 0, 0, win32con.SWP_NOMOVE | win32con.SWP_NOSIZE)
             last_topmost_check = time.time()
 
@@ -168,60 +176,71 @@ def main():
         draw_list.add_text(15, 15, imgui.get_color_u32_rgba(0.0, 1.0, 0.0, 1.0), "STATE: ENGINE_ACTIVE")
 
         if not client_dll:
-            draw_list.add_text(15, 32, imgui.get_color_u32_rgba(1.0, 0.8, 0.0, 1.0), "LINK: Scanning tasks for cs2.exe...")
+            draw_list.add_text(15, 32, imgui.get_color_u32_rgba(1.0, 0.8, 0.0, 1.0), "LINK: Looking for cs2.exe task...")
             for proc in pymem.process.list_processes():
                 if "cs2.exe" in str(proc.szExeFile).lower():
                     pid = proc.th32ProcessID
-                    # Пробуем открыть сначала в стандартном User-Mode, если игра не в режиме Админа
-                    handle = ctypes.windll.kernel32.OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-                    if handle:
-                        pm.process_id = pid
-                        pm.process_handle = handle
+                    # Запрос дескриптора ограниченных прав (работает БЕЗ админа и БЕЗ UAC)
+                    process_handle = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+                    if process_handle:
                         try:
-                            client_dll = pymem.process.module_from_name(pm.process_handle, "client.dll").lpBaseOfDll
-                        except: pass
+                            # Получаем базовый адрес через временную инициализацию Pymem под тем же PID
+                            pm_temp = pymem.Pymem()
+                            pm_temp.process_id = pid
+                            pm_temp.process_handle = process_handle
+                            client_dll = pymem.process.module_from_name(pm_temp.process_handle, "client.dll").lpBaseOfDll
+                        except:
+                            client_dll = None
         else:
-            draw_list.add_text(15, 32, imgui.get_color_u32_rgba(0.0, 0.8, 1.0, 1.0), "LINK: Connected (User-Mode Bypass)")
+            draw_list.add_text(15, 32, imgui.get_color_u32_rgba(0.0, 0.8, 1.0, 1.0), "LINK: Connected successfully (User-Mode API)")
             
             targets_count = 0
             try:
-                matrix_bytes = pm.read_bytes(client_dll + conf["dwViewMatrix"], 64)
-                view_matrix = list(struct.unpack('16f', matrix_bytes))
-                entity_list = pm.read_longlong(client_dll + conf["dwEntityList"])
-                
-                local_team = -1
-                try:
-                    local_pawn = pm.read_longlong(client_dll + conf["dwLocalPlayerPawn"])
-                    if local_pawn: local_team = pm.read_int(local_pawn + conf["m_iTeamNum"])
-                except: local_pawn = 0
+                # 1. Чтение матрицы
+                matrix_bytes = read_raw(process_handle, client_dll + conf["dwViewMatrix"], 64)
+                if matrix_bytes:
+                    view_matrix = list(struct.unpack('16f', matrix_bytes))
+                    entity_list = read_longlong(process_handle, client_dll + conf["dwEntityList"])
+                    
+                    local_team = -1
+                    local_pawn = read_longlong(process_handle, client_dll + conf["dwLocalPlayerPawn"])
+                    if local_pawn:
+                        local_team = read_int(process_handle, local_pawn + conf["m_iTeamNum"])
 
-                if entity_list:
-                    for i in range(1, 64): # Сужение пула сканирования до 64 слотов для экономии CPU в User-Mode
-                        try:
-                            list_entry = pm.read_longlong(entity_list + 0x8 * ((i & 0x7FFF) >> 9) + 0x10)
+                    if entity_list:
+                        # Сканируем стандартные 64 игровых слота
+                        for i in range(1, 64):
+                            # Вычисление entry-поинта в список сущностей Source 2
+                            list_entry = read_longlong(process_handle, entity_list + (8 * ((i & 0x7FFF) >> 9)) + 16)
                             if not list_entry: continue
                             
-                            controller = pm.read_longlong(list_entry + 0x78 * (i & 0x1FF))
+                            controller = read_longlong(process_handle, list_entry + (120 * (i & 0x1FF)))
                             if not controller: continue
                             
-                            pawn_handle = pm.read_uint(controller + conf["m_hPlayerPawn"])
+                            pawn_handle = read_uint(process_handle, controller + conf["m_hPlayerPawn"])
                             if not pawn_handle: continue
 
-                            list_entry_pawn = pm.read_longlong(entity_list + 0x8 * ((pawn_handle & 0x7FFF) >> 9) + 0x10)
+                            # ФИКС ПОБИТОВОЙ МАСКИ ДЛЯ ПАВНА В CS2:
+                            list_entry_pawn = read_longlong(process_handle, entity_list + (8 * ((pawn_handle & 0x7FFF) >> 9)) + 16)
                             if not list_entry_pawn: continue
                             
-                            pawn_ptr = pm.read_longlong(list_entry_pawn + 0x78 * (pawn_handle & 0x1FF))
+                            pawn_ptr = read_longlong(process_handle, list_entry_pawn + (120 * (pawn_handle & 0x1FF)))
                             if not pawn_ptr or pawn_ptr == local_pawn: continue
 
-                            health = pm.read_int(pawn_ptr + conf["m_iHealth"])
+                            health = read_int(process_handle, pawn_ptr + conf["m_iHealth"])
+                            # Валидация здоровья игрока
                             if health <= 0 or health > 100: continue
                             
-                            team = pm.read_int(pawn_ptr + conf["m_iTeamNum"])
-                            coords = pm.read_bytes(pawn_ptr + conf["m_vOldOrigin"], 12)
+                            team = read_int(process_handle, pawn_ptr + conf["m_iTeamNum"])
+                            
+                            # Чтение вектора координат (X, Y, Z)
+                            coords = read_raw(process_handle, pawn_ptr + conf["m_vOldOrigin"], 12)
+                            if not coords: continue
                             x, y, z = struct.unpack('3f', coords)
 
+                            # Проекция на 2D экран
                             screen_pos = world_to_screen([x, y, z], view_matrix, screen_w, screen_h)
-                            head_pos = world_to_screen([x, y, z + 65.0], view_matrix, screen_w, screen_h) # 65.0 оптимизировано под Z-высоту моделей
+                            head_pos = world_to_screen([x, y, z + 72.0], view_matrix, screen_w, screen_h)
 
                             if screen_pos and head_pos:
                                 targets_count += 1
@@ -229,20 +248,23 @@ def main():
                                 _, h_y = head_pos
                                 
                                 box_h = max(4.0, sc_y - h_y)
-                                box_w = box_h / 1.8
+                                box_w = box_h / 1.9
                                 
+                                # Отрисовка: союзники - синие, враги - красные
                                 color = imgui.get_color_u32_rgba(0.1, 0.6, 1.0, 1.0) if team == local_team else imgui.get_color_u32_rgba(1.0, 0.1, 0.1, 1.0)
                                 draw_list.add_rect(sc_x - box_w/2, h_y, sc_x + box_w/2, sc_y, color, 0.0, 0, 1.5)
 
+                                # Динамический хитбар здоровья
                                 hp_p = health / 100.0
                                 hp_color = imgui.get_color_u32_rgba(1.0 - hp_p, hp_p, 0.0, 1.0)
                                 hp_h = box_h * hp_p
                                 
                                 draw_list.add_rect_filled(sc_x - box_w/2 - 6, h_y, sc_x - box_w/2 - 2, sc_y, imgui.get_color_u32_rgba(0.0, 0.0, 0.0, 0.5))
                                 draw_list.add_rect_filled(sc_x - box_w/2 - 5, sc_y - hp_h, sc_x - box_w/2 - 3, sc_y, hp_color)
-                        except: continue
-            except: client_dll = None
-                
+            except Exception as ex:
+                # В случае критического сброса структуры (смена раунда, смерть локального игрока) чистим дескриптор
+                client_dll = None
+
             draw_list.add_text(15, 49, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), f"TARGETS VISIBLE: {targets_count}")
 
         imgui.end()
@@ -253,6 +275,8 @@ def main():
         renderer.render(imgui.get_draw_data())
         glfw.swap_buffers(window)
 
+    if process_handle:
+        CloseHandle(process_handle)
     renderer.shutdown()
     glfw.terminate()
 
