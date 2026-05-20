@@ -1,9 +1,6 @@
 pymem
-pywin32
-imgui[glfw]
+win32
 glfw
+imgui[full]
 PyOpenGL
-PyOpenGL-accelerate
 requests
-pyinstaller
-numpy
