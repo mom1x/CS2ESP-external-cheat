@@ -30,11 +30,7 @@ jobs:
 
     - name: Build EXE
       run: |
-        pyinstaller --onefile --windowed --name CS2ESP ^
-        --hidden-import=requests ^
-        --hidden-import=pymem ^
-        --add-binary "glfw3.dll;." ^
-        launcher.py
+        pyinstaller --onefile --windowed --name CS2ESP --hidden-import=requests --hidden-import=pymem --add-binary "glfw3.dll;." launcher.py
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
