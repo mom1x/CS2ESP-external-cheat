@@ -1,4 +1,4 @@
-name: Build CS2ESP (No elevated rights)
+name: Build CS2ESP (no admin, patched pymem)
 
 on:
   workflow_dispatch:
@@ -42,6 +42,24 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
         pip install pyinstaller
+
+    - name: Patch pymem to use minimal process rights (no admin needed)
+      run: |
+        # Ищем файл, где вызывается OpenProcess, и заменяем PROCESS_ALL_ACCESS на PROCESS_VM_READ (0x10)
+        $pymemDir = python -c "import pymem, os; print(os.path.dirname(pymem.__file__))"
+        $processFile = Join-Path $pymemDir "process.py"
+        if (Test-Path $processFile) {
+          (Get-Content $processFile) -replace '0x1FFFFF', '0x10' | Set-Content $processFile
+          Write-Host "pymem process.py patched (PROCESS_ALL_ACCESS -> PROCESS_VM_READ)."
+        } else {
+          Write-Host "process.py not found, searching for other files..."
+          # Если структура иная, заменим во всех .py файлах внутри pymem
+          Get-ChildItem -Path $pymemDir -Filter "*.py" -Recurse | ForEach-Object {
+            (Get-Content $_.FullName) -replace '0x1FFFFF', '0x10' | Set-Content $_.FullName
+          }
+          Write-Host "All pymem files patched."
+        }
+        Write-Host "Patching complete."
 
     - name: Build EXE with PyInstaller (no admin)
       run: |
