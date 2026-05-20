@@ -1,4 +1,4 @@
-name: Build ESP Project
+name: Build CS2 ESP
 
 on:
   push:
@@ -38,10 +38,10 @@ jobs:
 
     - name: Compile to EXE with PyInstaller
       run: |
-        pyinstaller --noconfirm --onefile --windowed --add-data "offsets/offsets.json;offsets" --add-data "offsets/client_dll.json;offsets" --add-binary "glfw3.dll;." CS2ESP.py
+        pyinstaller --noconfirm --onefile --add-data "offsets/offsets.json;offsets" --add-data "offsets/client_dll.json;offsets" --add-binary "glfw3.dll;." CS2_PRO_ESP.py
 
     - name: Upload Build Artifact
       uses: actions/upload-artifact@v4
       with:
         name: CS2-ESP-Executable
-        path: dist/CS2ESP.exe
+        path: dist/CS2_PRO_ESP.exe
