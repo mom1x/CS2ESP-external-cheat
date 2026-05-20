@@ -1,5 +1,12 @@
 import os
 import sys
+
+# ФИКС PYOPENGL: Принудительно отключаем поиск numpy до импорта OpenGL
+os.environ['PYOPENGL_PLATFORM'] = 'egl' 
+import OpenGL
+OpenGL.ERROR_CHECKING = False
+OpenGL.ERROR_LOGGING = False
+
 import json
 import time
 import pymem
@@ -20,7 +27,6 @@ import win32con
 # 1. ЗАГРУЗКА ОФФСЕТОВ ИЗ ОТДЕЛЬНОЙ ПАПКИ
 # ==========================================
 def load_offsets():
-    # Хардкод-кэш на случай тотального сбоя файлов
     offsets_dict = {
         "dwEntityList": 0x18C2DB8, 
         "dwViewMatrix": 0x19242A0, 
@@ -31,7 +37,6 @@ def load_offsets():
         "m_iTeamNum": 0x3BF
     }
 
-    # Строго определяем путь к папке, где лежит сам запущенный .exe или .py файл
     if getattr(sys, 'frozen', False):
         root_dir = os.path.dirname(sys.executable)
     else:
@@ -78,18 +83,22 @@ def load_offsets():
     return offsets_dict
 
 # ==========================================
-# 2. МАТЕМАТИКА ПРОЕКЦИИ (WORLD TO SCREEN)
+# 2. ИСПРАВЛЕННАЯ МАТЕМАТИКА W2S (ПИКСЕЛИ)
 # ==========================================
-def world_to_screen(pos, matrix):
+def world_to_screen(pos, matrix, width, height):
+    # Рассчитываем глубину W
     w = matrix[12] * pos[0] + matrix[13] * pos[1] + matrix[14] * pos[2] + matrix[15]
     if w < 0.01:
         return None
     
+    # Рассчитываем нормализованные координаты X и Y
     x = matrix[0] * pos[0] + matrix[1] * pos[1] + matrix[2] * pos[2] + matrix[3]
     y = matrix[4] * pos[0] + matrix[5] * pos[1] + matrix[6] * pos[2] + matrix[7]
     
-    screen_x = (x / w) + 1.0
-    screen_y = 1.0 - (y / w)
+    # Переводим строго в абсолютные пиксели монитора игрока
+    screen_x = (width / 2) + (x / w) * (width / 2)
+    screen_y = (height / 2) - (y / w) * (height / 2)
+    
     return screen_x, screen_y
 
 # ==========================================
@@ -136,7 +145,6 @@ def main():
     pm = pymem.Pymem()
     client_dll = None
     
-    # Обход UAC: Получаем дескриптор процесса через WinAPI с минимальными правами доступа
     while True:
         try:
             pid = None
@@ -154,7 +162,6 @@ def main():
                 PROCESS_VM_READ = 0x0010
                 PROCESS_QUERY_INFORMATION = 0x0400
                 
-                # Запрос дескриптора у Windows без триггера Администратора
                 handle = ctypes.windll.kernel32.OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, False, pid)
                 
                 if handle:
@@ -183,7 +190,7 @@ def main():
         draw_list = imgui.get_window_draw_list()
 
         try:
-            # Читаем всю матрицу за 1 системный запрос (64 байта вместо 16 вызовов по 4 байта)
+            # Читаем матрицу единым пулом (64 байта)
             matrix_bytes = pm.read_bytes(client_dll + conf["dwViewMatrix"], 64)
             view_matrix = list(struct.unpack('16f', matrix_bytes))
             
@@ -232,28 +239,28 @@ def main():
 
                         team = pm.read_int(pawn_ptr + conf["m_iTeamNum"])
 
-                        pos_x = pm.read_float(pawn_ptr + conf["m_vOldOrigin"])
-                        pos_y = pm.read_float(pawn_ptr + conf["m_vOldOrigin"] + 4)
-                        pos_z = pm.read_float(pawn_ptr + conf["m_vOldOrigin"] + 8)
+                        # АТОМАРНОЕ ЧТЕНИЕ КООРДИНАТ: Читаем Vector3 (12 байт) за раз, чтобы избежать сдвигов
+                        coord_bytes = pm.read_bytes(pawn_ptr + conf["m_vOldOrigin"], 12)
+                        pos_x, pos_y, pos_z = struct.unpack('3f', coord_bytes)
 
-                        screen_pos = world_to_screen([pos_x, pos_y, pos_z], view_matrix)
+                        # Передаем размеры экрана в функцию перевода координат
+                        screen_pos = world_to_screen([pos_x, pos_y, pos_z], view_matrix, screen_w, screen_h)
                         
                         if screen_pos:
-                            sc_x = screen_pos[0] * (screen_w / 2)
-                            sc_y = screen_pos[1] * (screen_h / 2)
+                            sc_x, sc_y = screen_pos
                             
-                            head_pos = world_to_screen([pos_x, pos_y, pos_z + 72.0], view_matrix)
+                            head_pos = world_to_screen([pos_x, pos_y, pos_z + 72.0], view_matrix, screen_w, screen_h)
                             if head_pos:
-                                h_y = head_pos[1] * (screen_h / 2)
+                                h_y = head_pos[1]
                                 box_height = max(5.0, sc_y - h_y)
                                 box_width = box_height / 1.8
                                 
                                 if team == local_team and local_team != -1:
-                                    color = imgui.get_color_u32_rgba(0.2, 0.6, 1.0, 1.0) # Синий для союзников
+                                    color = imgui.get_color_u32_rgba(0.2, 0.6, 1.0, 1.0) # Синий (Союзники)
                                 else:
-                                    color = imgui.get_color_u32_rgba(1.0, 0.2, 0.2, 1.0) # Красный для ботов/врагов
+                                    color = imgui.get_color_u32_rgba(1.0, 0.2, 0.2, 1.0) # Красный (Враги/Боты)
                                 
-                                # Отрисовка геометрии (Позиционная передача аргументов для Cython)
+                                # Прямая отрисовка пиксельных координат
                                 draw_list.add_rect(
                                     sc_x - (box_width / 2), 
                                     h_y, 
