@@ -1,24 +1,36 @@
 import os
 import sys
+import json
+import time
+import ctypes
+import struct
+import warnings
 
-# ФИКС PYOPENGL: Принудительно отключаем поиск numpy до импорта OpenGL
-os.environ['PYOPENGL_PLATFORM'] = 'egl' 
+# Скрываем предупреждения PyOpenGL об отсутствии numpy, чтобы они не засоряли консоль
+warnings.filterwarnings("ignore", category=UserWarning, module='OpenGL')
+
+# ==========================================
+# ФИКС PYOPENGL ДЛЯ PYINSTALLER (.EXE)
+# ==========================================
+# Принудительно заставляем PyOpenGL использовать стандартную win32 платформу,
+# предотвращая динамический поиск отсутствующих модулей внутри скомпилированного .exe
+os.environ['PYOPENGL_PLATFORM'] = 'win32'
+
 import OpenGL
 OpenGL.ERROR_CHECKING = False
 OpenGL.ERROR_LOGGING = False
 
-import json
-import time
+# Загружаем модули OpenGL
+import OpenGL.GL as gl
+
+# Остальные импорты софта
 import pymem
 import pymem.exception
 import glfw
-import OpenGL.GL as gl
 import imgui
 from imgui.integrations.glfw import GlfwRenderer
-import ctypes
-import struct
 
-# Системные библиотеки Windows
+# Системные библиотеки Windows для работы с окнами
 import win32api
 import win32gui
 import win32con
@@ -83,19 +95,16 @@ def load_offsets():
     return offsets_dict
 
 # ==========================================
-# 2. ИСПРАВЛЕННАЯ МАТЕМАТИКА W2S (ПИКСЕЛИ)
+# 2. МАТЕМАТИКА W2S (ТОЧНЫЕ ПИКСЕЛИ)
 # ==========================================
 def world_to_screen(pos, matrix, width, height):
-    # Рассчитываем глубину W
     w = matrix[12] * pos[0] + matrix[13] * pos[1] + matrix[14] * pos[2] + matrix[15]
     if w < 0.01:
         return None
     
-    # Рассчитываем нормализованные координаты X и Y
     x = matrix[0] * pos[0] + matrix[1] * pos[1] + matrix[2] * pos[2] + matrix[3]
     y = matrix[4] * pos[0] + matrix[5] * pos[1] + matrix[6] * pos[2] + matrix[7]
     
-    # Переводим строго в абсолютные пиксели монитора игрока
     screen_x = (width / 2) + (x / w) * (width / 2)
     screen_y = (height / 2) - (y / w) * (height / 2)
     
@@ -162,6 +171,7 @@ def main():
                 PROCESS_VM_READ = 0x0010
                 PROCESS_QUERY_INFORMATION = 0x0400
                 
+                # Запрос только необходимых прав у Windows (Отказ от UAC)
                 handle = ctypes.windll.kernel32.OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, False, pid)
                 
                 if handle:
@@ -190,7 +200,6 @@ def main():
         draw_list = imgui.get_window_draw_list()
 
         try:
-            # Читаем матрицу единым пулом (64 байта)
             matrix_bytes = pm.read_bytes(client_dll + conf["dwViewMatrix"], 64)
             view_matrix = list(struct.unpack('16f', matrix_bytes))
             
@@ -239,11 +248,10 @@ def main():
 
                         team = pm.read_int(pawn_ptr + conf["m_iTeamNum"])
 
-                        # АТОМАРНОЕ ЧТЕНИЕ КООРДИНАТ: Читаем Vector3 (12 байт) за раз, чтобы избежать сдвигов
+                        # Атомарное чтение координат игрока (12 байт за раз)
                         coord_bytes = pm.read_bytes(pawn_ptr + conf["m_vOldOrigin"], 12)
                         pos_x, pos_y, pos_z = struct.unpack('3f', coord_bytes)
 
-                        # Передаем размеры экрана в функцию перевода координат
                         screen_pos = world_to_screen([pos_x, pos_y, pos_z], view_matrix, screen_w, screen_h)
                         
                         if screen_pos:
@@ -258,9 +266,9 @@ def main():
                                 if team == local_team and local_team != -1:
                                     color = imgui.get_color_u32_rgba(0.2, 0.6, 1.0, 1.0) # Синий (Союзники)
                                 else:
-                                    color = imgui.get_color_u32_rgba(1.0, 0.2, 0.2, 1.0) # Красный (Враги/Боты)
+                                    color = imgui.get_color_u32_rgba(1.0, 0.2, 0.2, 1.0) # Красный (Враги)
                                 
-                                # Прямая отрисовка пиксельных координат
+                                # Отрисовка бокса
                                 draw_list.add_rect(
                                     sc_x - (box_width / 2), 
                                     h_y, 
