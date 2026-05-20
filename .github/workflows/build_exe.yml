@@ -7,7 +7,6 @@ on:
 jobs:
   build:
     runs-on: windows-latest
-
     steps:
     - uses: actions/checkout@v4
 
@@ -19,12 +18,17 @@ jobs:
     - name: Install Dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install pymem pywin32 glfw PyOpenGL PyOpenGL-accelerate imgui[glfw] pyinstaller
+        pip install -r requirements.txt
 
     - name: Build with PyInstaller
       run: |
-        # --collect-all glfw принудительно зашьёт glfw3.dll внутрь готового .exe
-        pyinstaller --onefile --noconsole --hidden-import=OpenGL.platform.win32 --collect-all glfw --name CS2ESP CS2ESP.py
+        pyinstaller --onefile --noconsole ^
+        --hidden-import=OpenGL.platform.win32 ^
+        --hidden-import=numpy ^
+        --collect-all glfw ^
+        --collect-all imgui ^
+        --collect-all numpy ^
+        --name CS2ESP CS2ESP.py
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
