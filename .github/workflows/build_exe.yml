@@ -21,14 +21,7 @@ jobs:
         pip install -r requirements.txt
 
     - name: Build with PyInstaller
-      run: |
-        pyinstaller --onefile --noconsole ^
-        --hidden-import=OpenGL.platform.win32 ^
-        --hidden-import=numpy ^
-        --collect-all glfw ^
-        --collect-all imgui ^
-        --collect-all numpy ^
-        --name CS2ESP CS2ESP.py
+      run: pyinstaller --onefile --noconsole --hidden-import=OpenGL.platform.win32 --hidden-import=numpy --collect-all glfw --collect-all imgui --collect-all numpy --name CS2ESP CS2ESP.py
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
