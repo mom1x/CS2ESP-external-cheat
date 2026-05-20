@@ -7,8 +7,8 @@ import ctypes
 import struct
 import warnings
 
-# --- ИМПОРТЫ ---
-import numpy as np # Обязательно для PyOpenGL
+# --- Обязательные импорты ---
+import numpy as np 
 import pymem
 import pymem.process
 import glfw
@@ -19,18 +19,17 @@ import win32api
 import win32gui
 import win32con
 
-# Настройки OpenGL
+# --- Настройки ---
 os.environ['PYOPENGL_PLATFORM'] = 'win32'
 warnings.filterwarnings("ignore", category=UserWarning, module='OpenGL')
 
-# --- ИНИЦИАЛИЗАЦИЯ КОНСОЛИ ---
+# Инициализация консоли для exe
 try:
     ctypes.windll.kernel32.AllocConsole()
     sys.stdout = open("CONOUT$", "w", encoding="utf-8")
     sys.stderr = open("CONOUT$", "w", encoding="utf-8")
 except: pass
 
-# Определение путей (универсально для .py и .exe)
 if getattr(sys, 'frozen', False):
     BASE_DIR = os.path.dirname(sys.executable)
 else:
@@ -47,7 +46,7 @@ def log_message(level, message):
             f.write(formatted + "\n")
     except: pass
 
-# --- ФУНКЦИИ ПАМЯТИ ---
+# --- Функции чтения памяти ---
 def read_raw(handle, address, size):
     if not address or address < 0x1000: return None
     buf = ctypes.create_string_buffer(size)
@@ -68,16 +67,24 @@ def read_uint(handle, address):
     res = read_raw(handle, address, 4)
     return struct.unpack('I', res)[0] if res else 0
 
-# --- ЗАГРУЗКА CONFIG ---
+# --- Безопасная загрузка офсетов ---
 def load_offsets():
     offsets_dir = os.path.join(BASE_DIR, "offsets")
     off_path = os.path.join(offsets_dir, "offsets.json")
     cls_path = os.path.join(offsets_dir, "client_dll.json")
     
-    log_message("info", f"Looking for config in: {offsets_dir}")
-    
+    # Вспомогательная функция для парсинга
+    def get_val(data, key):
+        field = data.get(key)
+        if field is None: return 0
+        # Если значение в JSON — словарь, ищем value или offset
+        if isinstance(field, dict):
+            return field.get("value", field.get("offset", 0))
+        # Если это просто число (int), возвращаем его
+        return field
+
     if not os.path.exists(off_path) or not os.path.exists(cls_path):
-        log_message("critical", f"JSON FILES NOT FOUND! Checked in: {offsets_dir}")
+        log_message("critical", f"JSON FILES NOT FOUND in {offsets_dir}")
         return None
 
     try:
@@ -86,20 +93,24 @@ def load_offsets():
         with open(cls_path, "r", encoding="utf-8") as f:
             raw_classes = json.load(f)["client.dll"]["classes"]
             
+        fields_base = raw_classes.get("C_BaseEntity", {}).get("fields", {})
+        fields_controller = raw_classes.get("CCSPlayerController", {}).get("fields", {})
+        fields_pawn = raw_classes.get("C_BasePlayerPawn", {}).get("fields", {})
+            
         return {
-            "dwEntityList": raw_offsets["dwEntityList"],
-            "dwViewMatrix": raw_offsets["dwViewMatrix"],
-            "dwLocalPlayerPawn": raw_offsets["dwLocalPlayerPawn"],
-            "m_iHealth": raw_classes["C_BaseEntity"]["fields"]["m_iHealth"]["value"],
-            "m_hPlayerPawn": raw_classes["CCSPlayerController"]["fields"]["m_hPlayerPawn"]["value"],
-            "m_vOldOrigin": raw_classes["C_BasePlayerPawn"]["fields"]["m_vOldOrigin"]["value"],
-            "m_iTeamNum": raw_classes["C_BasePlayerPawn"]["fields"]["m_iTeamNum"]["value"]
+            "dwEntityList": raw_offsets.get("dwEntityList", 0),
+            "dwViewMatrix": raw_offsets.get("dwViewMatrix", 0),
+            "dwLocalPlayerPawn": raw_offsets.get("dwLocalPlayerPawn", 0),
+            "m_iHealth": get_val(fields_base, "m_iHealth"),
+            "m_hPlayerPawn": get_val(fields_controller, "m_hPlayerPawn"),
+            "m_vOldOrigin": get_val(fields_pawn, "m_vOldOrigin"),
+            "m_iTeamNum": get_val(fields_pawn, "m_iTeamNum")
         }
     except Exception as e:
         log_message("critical", f"JSON Load Error: {e}")
         return None
 
-# --- ГРАФИКА ---
+# --- Инициализация Оверлея ---
 def init_overlay():
     if not glfw.init(): return None
     w, h = win32api.GetSystemMetrics(0), win32api.GetSystemMetrics(1)
@@ -107,7 +118,7 @@ def init_overlay():
     glfw.window_hint(glfw.DECORATED, glfw.FALSE)
     glfw.window_hint(glfw.TRANSPARENT_FRAMEBUFFER, glfw.TRUE)
     glfw.window_hint(glfw.MOUSE_PASSTHROUGH, glfw.TRUE)
-    window = glfw.create_window(w, h, "ESP", None, None)
+    window = glfw.create_window(w, h, "CS2_ESP", None, None)
     glfw.make_context_current(window)
     hwnd = glfw.get_win32_window(window)
     ex_style = win32con.WS_EX_LAYERED | win32con.WS_EX_TRANSPARENT | win32con.WS_EX_TOPMOST | win32con.WS_EX_TOOLWINDOW
@@ -115,17 +126,17 @@ def init_overlay():
     imgui.create_context()
     return window, GlfwRenderer(window), w, h
 
-# --- MAIN ---
+# --- Основной цикл ---
 def main():
     conf = load_offsets()
     if not conf:
-        time.sleep(5) # Чтобы успеть прочитать ошибку
+        time.sleep(5)
         return
 
     window, renderer, w_scr, h_scr = init_overlay()
     process_handle, client_dll = None, None
 
-    log_message("info", "ESP started. Searching for CS2...")
+    log_message("info", "ESP active. Waiting for CS2...")
 
     while not glfw.window_should_close(window):
         glfw.poll_events()
@@ -140,7 +151,7 @@ def main():
                     pm.process_id = pid
                     try:
                         client_dll = pymem.process.module_from_name(pm.process_handle, "client.dll").lpBaseOfDll
-                        log_message("info", f"Found CS2! PID: {pid}, Client.dll: {hex(client_dll)}")
+                        log_message("info", f"Linked to CS2. Base: {hex(client_dll)}")
                     except: pass
                     break
 
@@ -151,7 +162,7 @@ def main():
         draw_list = imgui.get_window_draw_list()
         
         targets = 0
-        if client_dll:
+        if client_dll and process_handle:
             try:
                 entity_list = read_longlong(process_handle, client_dll + conf["dwEntityList"])
                 local_pawn = read_longlong(process_handle, client_dll + conf["dwLocalPlayerPawn"])
@@ -174,7 +185,7 @@ def main():
                             targets += 1
             except: pass
 
-        draw_list.add_text(20, 20, 0xFFFFFFFF, f"Targets found: {targets}")
+        draw_list.add_text(20, 20, 0xFFFFFFFF, f"Targets: {targets}")
         imgui.end()
         
         gl.glClear(gl.GL_COLOR_BUFFER_BIT)
