@@ -30,9 +30,15 @@ jobs:
         curl -o offsets/offsets.json https://raw.githubusercontent.com/a2x/cs2-dumper/main/output/offsets.json
         curl -o offsets/client_dll.json https://raw.githubusercontent.com/a2x/cs2-dumper/main/output/client_dll.json
 
+    - name: Download and Extract GLFW Binary
+      run: |
+        curl -L -o glfw.zip https://github.com/glfw/glfw/releases/download/3.4/glfw-3.4.bin.WIN64.zip
+        tar -xf glfw.zip
+        copy glfw-3.4.bin.WIN64\lib-vc2022\glfw3.dll .
+
     - name: Compile to EXE with PyInstaller
       run: |
-        pyinstaller --noconfirm --onefile --windowed --add-data "offsets/offsets.json;offsets" --add-data "offsets/client_dll.json;offsets" CS2ESP.py
+        pyinstaller --noconfirm --onefile --windowed --add-data "offsets/offsets.json;offsets" --add-data "offsets/client_dll.json;offsets" --add-binary "glfw3.dll;." CS2ESP.py
 
     - name: Upload Build Artifact
       uses: actions/upload-artifact@v4
