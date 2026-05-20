@@ -1,208 +1,236 @@
+import os
+import json
+import time
 import pymem
-import pymem.process
-import win32gui, win32con, win32api
-import time, os, sys, json, requests
-import imgui
-from imgui.integrations.glfw import GlfwRenderer
+import pymem.exception
 import glfw
 import OpenGL.GL as gl
+import imgui
+from imgui.integrations.glfw import GlfwRenderer
 
-# Настройка размеров экрана под твой монитор автоматически
-WINDOW_WIDTH = win32api.GetSystemMetrics(0)
-WINDOW_HEIGHT = win32api.GetSystemMetrics(1)
-
-debug_info = {"status": "Инициализация...", "entities_found": 0, "local_pawn": 0}
-
-def get_resource_path(relative_path):
-    """ Получает путь к ресурсам, упакованным через PyInstaller """
-    if hasattr(sys, '_MEIPASS'):
-        return os.path.join(sys._MEIPASS, relative_path)
-    return os.path.join(os.path.abspath("."), relative_path)
-
+# ==========================================
+# 1. ЗАГРУЗКА ОФФСЕТОВ ИЗ JSON
+# ==========================================
 def load_offsets():
-    """ Загружает оффсеты из локальных файлов или из сети в случае их отсутствия """
-    local_offsets_path = get_resource_path("offsets/offsets.json")
-    local_client_path = get_resource_path("offsets/client_dll.json")
-    
-    if os.path.exists(local_offsets_path) and os.path.exists(local_client_path):
-        try:
-            print("[INFO] Загрузка встроенных оффсетов из памяти EXE...")
-            with open(local_offsets_path, 'r') as f:
-                off = json.load(f)
-            with open(local_client_path, 'r') as f:
-                cl = json.load(f)
-            return off, cl
-        except Exception as e:
-            print(f"[WARN] Ошибка чтения локальных файлов, пробуем сеть: {e}")
-
+    print("[INFO] Загрузка встроенных оффсетов из папки offsets...")
     try:
-        print("[INFO] Локальные оффсеты не найдены. Загрузка из сети...")
-        off = requests.get('https://raw.githubusercontent.com/a2x/cs2-dumper/main/output/offsets.json').json()
-        cl = requests.get('https://raw.githubusercontent.com/a2x/cs2-dumper/main/output/client_dll.json').json()
-        return off, cl
+        # Пути к файлам, которые скачивает твой GitHub Workflow
+        offsets_path = os.path.join("offsets", "offsets.json")
+        client_dll_path = os.path.join("offsets", "client_dll.json")
+
+        with open(offsets_path, "r") as f:
+            offsets = json.load(f)["client.dll"]
+        with open(client_dll_path, "r") as f:
+            client_data = json.load(f)["client.dll"]["classes"]
+
+        # Извлекаем нужные оффсеты (имена соответствуют дамперу a2x)
+        return {
+            "dwEntityList": offsets["dwEntityList"],
+            "dwViewMatrix": offsets["dwViewMatrix"],
+            "dwLocalPlayerPawn": offsets["dwLocalPlayerPawn"],
+            # Смещения для классов (проверяем разные варианты именования в дампере)
+            "m_iHealth": client_data.get("C_BaseEntity", {}).get("fields", {}).get("m_iHealth", 0x32C),
+            "m_hPlayerPawn": client_data.get("CCSPlayerController", {}).get("fields", {}).get("m_hPlayerPawn", 0x7BC),
+            "m_vOldOrigin": client_data.get("C_BasePlayerPawn", {}).get("fields", {}).get("m_vOldOrigin", 0x1274),
+            "m_iTeamNum": client_data.get("C_BaseEntity", {}).get("fields", {}).get("m_iTeamNum", 0x3bf)
+        }
     except Exception as e:
-        print(f"[CRIT] Ошибка сети. Не удалось получить данные: {e}")
-        return None, None
+        print(f"[ERROR] Ошибка загрузки JSON конфигурации оффсетов: {e}")
+        # Запасные хардкод значения, если JSON не прочитался
+        return {
+            "dwEntityList": 0x18C2DB8, "dwViewMatrix": 0x19242A0, "dwLocalPlayerPawn": 0x1823A08,
+            "m_iHealth": 0x32C, "m_hPlayerPawn": 0x7BC, "m_vOldOrigin": 0x1274, "m_iTeamNum": 0x3bf
+        }
 
-off_data, client_data = load_offsets()
-if not off_data or not client_data:
-    print("[ERROR] Не удалось инициализировать базу данных смещений. Завершение работы.")
-    sys.exit(1)
-
-# Парсинг необходимых оффсетов
-dwEntityList = off_data['client.dll']['dwEntityList']
-dwLocalPlayerPawn = off_data['client.dll']['dwLocalPlayerPawn']
-dwViewMatrix = off_data['client.dll']['dwViewMatrix']
-
-m_iTeamNum = client_data['client.dll']['classes']['C_BaseEntity']['fields']['m_iTeamNum']
-m_iHealth = client_data['client.dll']['classes']['C_BaseEntity']['fields']['m_iHealth']
-m_hPlayerPawn = client_data['client.dll']['classes']['CCSPlayerController']['fields']['m_hPlayerPawn']
-m_pGameSceneNode = client_data['client.dll']['classes']['C_BaseEntity']['fields']['m_pGameSceneNode']
-m_vecAbsOrigin = client_data['client.dll']['classes']['CGameSceneNode']['fields']['m_vecAbsOrigin']
-m_lifeState = client_data['client.dll']['classes']['C_BaseEntity']['fields']['m_lifeState']
-
-def w2s(mtx, pos, width, height):
-    """ Перевод 3D координат игры в 2D координаты экрана """
-    w = mtx[12]*pos[0] + mtx[13]*pos[1] + mtx[14]*pos[2] + mtx[15]
-    if w < 0.01: 
+# ==========================================
+# 2. МАТЕМАТИКА (WORLD TO SCREEN)
+# ==========================================
+def world_to_screen(pos, matrix):
+    # pos = [x, y, z]
+    # matrix = список из 16 элементов фрейма матрицы
+    w = matrix[12] * pos[0] + matrix[13] * pos[1] + matrix[14] * pos[2] + matrix[15]
+    if w < 0.01:
         return None
     
-    x = mtx[0]*pos[0] + mtx[1]*pos[1] + mtx[2]*pos[2] + mtx[3]
-    y = mtx[4]*pos[0] + mtx[5]*pos[1] + mtx[6]*pos[2] + mtx[7]
+    x = matrix[0] * pos[0] + matrix[1] * pos[1] + matrix[2] * pos[2] + matrix[3]
+    y = matrix[4] * pos[0] + matrix[5] * pos[1] + matrix[6] * pos[2] + matrix[7]
     
-    nx = (width / 2) + (x / w) * (width / 2)
-    ny = (height / 2) - (y / w) * (height / 2)
-    return [nx, ny]
-
-def main_logic(draw_list, pm, client_base):
-    try:
-        v_matrix = [pm.read_float(client_base + dwViewMatrix + i * 4) for i in range(16)]
-        local_pawn = pm.read_longlong(client_base + dwLocalPlayerPawn)
-        if not local_pawn: 
-            return
-        
-        local_team = pm.read_int(local_pawn + m_iTeamNum)
-        ent_list = pm.read_longlong(client_base + dwEntityList)
-        
-        debug_info["local_pawn"] = local_pawn
-        count = 0
-
-        for i in range(1, 64):
-            # Поиск Контроллера сущности
-            entry_ptr = pm.read_longlong(ent_list + 8 * ((i & 0x7FFF) >> 9) + 16)
-            if not entry_ptr: 
-                continue
-            
-            controller = pm.read_longlong(entry_ptr + 120 * (i & 0x1FF))
-            if not controller: 
-                continue
-            
-            # Поиск Хэндла связанного Pawn
-            pawn_handle = pm.read_int(controller + m_hPlayerPawn)
-            if not pawn_handle: 
-                continue
-            
-            # Поиск указателя на сам Pawn
-            pawn_ptr = pm.read_longlong(ent_list + 8 * ((pawn_handle & 0x7FFF) >> 9) + 16)
-            if not pawn_ptr: 
-                continue
-            
-            pawn = pm.read_longlong(pawn_ptr + 120 * (pawn_handle & 0x1FF))
-            if not pawn or pawn == local_pawn: 
-                continue
-
-            # Фильтрация состояния игрока/бота
-            health = pm.read_int(pawn + m_iHealth)
-            team = pm.read_int(pawn + m_iTeamNum)
-            life_state = pm.read_int(pawn + m_lifeState)
-            
-            if health <= 0 or health > 100 or team == local_team or life_state != 0:
-                continue
-
-            # Сбор пространственных координат
-            scene_node = pm.read_longlong(pawn + m_pGameSceneNode)
-            abs_origin = [
-                pm.read_float(scene_node + m_vecAbsOrigin),
-                pm.read_float(scene_node + m_vecAbsOrigin + 4),
-                pm.read_float(scene_node + m_vecAbsOrigin + 8)
-            ]
-            
-            feet = w2s(v_matrix, abs_origin, WINDOW_WIDTH, WINDOW_HEIGHT)
-            head = w2s(v_matrix, [abs_origin[0], abs_origin[1], abs_origin[2] + 72], WINDOW_WIDTH, WINDOW_HEIGHT)
-            
-            if feet and head:
-                h = abs(feet[1] - head[1])
-                w = h / 2
-                
-                # Рендеринг интерфейса ESP
-                color = imgui.get_color_u32_rgba(1.0, 0.2, 0.2, 1.0)
-                draw_list.add_rect(head[0] - w/2, head[1], head[0] + w/2, feet[1], color, thickness=1.5)
-                draw_list.add_text(head[0] - w/2, head[1] - 15, color, f"{health} HP")
-                count += 1
-        
-        debug_info["entities_found"] = count
-
-    except Exception as e:
-        debug_info["status"] = f"Ошибка чтения: {e}"
-
-def main():
-    if not glfw.init(): 
-        return
+    # Нормализация координат под экран
+    screen_x = (x / w) + 1.0
+    screen_y = 1.0 - (y / w)
     
-    glfw.window_hint(glfw.TRANSPARENT_FRAMEBUFFER, glfw.TRUE)
+    # Рассчитываем относительно разрешения окна (будет обновляться в цикле)
+    return screen_x, screen_y
+
+# ==========================================
+# 3. ИНИЦИАЛИЗАЦИЯ GLFW И IMGUI ОВЕРЛЕЯ
+# ==========================================
+def init_overlay():
+    if not glfw.init():
+        return None
+    
+    # Настройки для создания полностью прозрачного окна поверх игры
     glfw.window_hint(glfw.FLOATING, glfw.TRUE)
     glfw.window_hint(glfw.DECORATED, glfw.FALSE)
+    glfw.window_hint(glfw.TRANSPARENT_FRAMEBUFFER, glfw.TRUE)
+    glfw.window_hint(glfw.MOUSE_PASSTHROUGH, glfw.TRUE) # Клики проходят сквозь окно в игру
+
+    # Получаем разрешение монитора для оверлея
+    monitor = glfw.get_primary_monitor()
+    mode = glfw.get_video_mode(monitor)
     
-    window = glfw.create_window(WINDOW_WIDTH, WINDOW_HEIGHT, "CS2 Overlay", None, None)
+    window = glfw.create_window(mode.width, mode.height, "CS2_OVERLAY", None, None)
+    if not window:
+        glfw.terminate()
+        return None
+        
     glfw.make_context_current(window)
-    
-    hwnd = glfw.get_win32_window(window)
-    win32gui.SetWindowLong(hwnd, win32con.GWL_EXSTYLE, 
-                           win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE) | win32con.WS_EX_LAYERED | win32con.WS_EX_TRANSPARENT)
+    glfw.swap_interval(1) # Включаем вертикальную синхронизацию для стабильного FPS
     
     imgui.create_context()
-    impl = GlfwRenderer(window)
+    renderer = GlfwRenderer(window)
+    return window, renderer, mode.width, mode.height
+
+# ==========================================
+# 4. ОСНОВНОЙ ПРОЦЕСС И БЕЗОПАСНЫЙ ЦИКЛ
+# ==========================================
+def main():
+    conf = load_offsets()
+    print("[INFO] Ожидание запуска CS2...")
     
     pm = None
-    client_base = None
+    client_dll = None
+    
+    # Бесконечный цикл поиска процесса игры
+    while True:
+        try:
+            pm = pymem.Pymem("cs2.exe")
+            client_dll = pymem.process.module_from_name(pm.process_handle, "client.dll").lpBaseOfDll
+            print("[SUCCESS] Успешное подключение к памяти CS2!")
+            break
+        except pymem.exception.ProcessNotFound:
+            time.sleep(1)
+        except Exception:
+            time.sleep(1)
 
-    print("[INFO] Скрипт запущен. Ожидание CS2...")
+    # Инициализируем графическое окно оверлея
+    window, renderer, screen_w, screen_h = init_overlay()
+    if not window:
+        print("[ERROR] Не удалось создать окно ImGui оверлея.")
+        return
 
+    # Главный цикл отрисовки
     while not glfw.window_should_close(window):
         glfw.poll_events()
-        impl.process_inputs()
-        imgui.new_frame()
+        renderer.process_inputs()
         
-        if not pm:
-            try:
-                pm = pymem.Pymem("cs2.exe")
-                client_base = pymem.process.module_from_name(pm.process_handle, "client.dll").lpBaseOfDll
-                debug_info["status"] = "CS2 найдена и подключена"
-                print("[SUCCESS] Успешное подключение к памяти CS2.")
-            except:
-                debug_info["status"] = "Ожидание запуска cs2.exe..."
-
+        imgui.new_frame()
+        # Создаем прозрачный холст на весь экран монитора
+        imgui.set_next_window_size(screen_w, screen_h)
         imgui.set_next_window_position(0, 0)
-        imgui.set_next_window_size(WINDOW_WIDTH, WINDOW_HEIGHT)
-        imgui.begin("Overlay", flags=imgui.WINDOW_NO_TITLE_BAR | imgui.WINDOW_NO_BACKGROUND | imgui.WINDOW_NO_INPUTS)
+        imgui.begin("OverlayWindow", flags=imgui.WINDOW_NO_TITLE_BAR | imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_BACKGROUND | imgui.WINDOW_NO_INPUTS)
         
         draw_list = imgui.get_window_draw_list()
-        
-        # Вывод системных данных в левый верхний угол экрана
-        draw_list.add_text(15, 15, imgui.get_color_u32_rgba(0.0, 1.0, 0.0, 1.0), 
-                           f"Статус: {debug_info['status']} | Отрисовано целей: {debug_info['entities_found']}")
-        
-        if pm and client_base:
-            main_logic(draw_list, pm, client_base)
+
+        try:
+            # Читаем матрицу обзора (ViewMatrix состоит из 16 значений float, то есть 64 байта)
+            view_matrix_bytes = pm.read_bytes(client_dll + conf["dwViewMatrix"], 64)
+            view_matrix = [struct_unpack('f', view_matrix_bytes[i:i+4])[0] for i in range(0, 64, 4)] if 'struct_unpack' in globals() else []
             
+            # Если struct не импортирован, прочитаем проще через цикл для стабильности:
+            view_matrix = []
+            for m_idx in range(16):
+                view_matrix.append(pm.read_float(client_dll + conf["dwViewMatrix"] + (m_idx * 4)))
+
+            # Безопасно получаем адрес списка сущностей
+            entity_list = pm.read_longlong(client_dll + conf["dwEntityList"])
+            
+            if entity_list and entity_list != 0:
+                # Перебираем все 64 слота под игроков на сервере
+                for i in range(64):
+                    try:
+                        # 1. Валидация ячейки списка
+                        list_entry = pm.read_longlong(entity_list + (i * 0x20))
+                        if not list_entry or list_entry == 0:
+                            continue # Слот пуст — прыгаем дальше БЕЗ ошибок доступа
+
+                        # 2. Валидация контроллера игрока
+                        player_controller = pm.read_longlong(list_entry + 0x0)
+                        if not player_controller or player_controller == 0:
+                            continue
+
+                        # 3. Находим хэндл (ID) физического объекта игрока (Pawn)
+                        pawn_handle = pm.read_uint(player_controller + conf["m_hPlayerPawn"])
+                        if not pawn_handle or pawn_handle == 0:
+                            continue
+
+                        # 4. Находим адрес Pawn в памяти через хэндл-биты
+                        list_entry_pawn = pm.read_longlong(entity_list + (0x8 * ((pawn_handle & 0x7FFF) >> 9) + 0x10))
+                        if not list_entry_pawn or list_entry_pawn == 0:
+                            continue
+
+                        pawn_ptr = pm.read_longlong(list_entry_pawn + (0x78 * (pawn_handle & 0x1FF)))
+                        if not pawn_ptr or pawn_ptr == 0:
+                            continue
+
+                        # 5. Читаем данные живого игрока
+                        health = pm.read_int(pawn_ptr + conf["m_iHealth"])
+                        if health <= 0 or health > 100:
+                            continue # Игрок мертв или данные некорректны
+
+                        # Получаем координаты ног игрока на карте
+                        pos_x = pm.read_float(pawn_ptr + conf["m_vOldOrigin"])
+                        pos_y = pm.read_float(pawn_ptr + conf["m_vOldOrigin"] + 4)
+                        pos_z = pm.read_float(pawn_ptr + conf["m_vOldOrigin"] + 8)
+
+                        # Переводим 3D координаты игры в 2D координаты твоего экрана
+                        screen_pos = world_to_screen([pos_x, pos_y, pos_z], view_matrix)
+                        
+                        if screen_pos:
+                            # Проекция на разрешение экрана
+                            sc_x = screen_pos[0] * (screen_w / 2)
+                            sc_y = screen_pos[1] * (screen_h / 2)
+                            
+                            # Рассчитываем примерную высоту бокса в зависимости от дистанции
+                            head_pos = world_to_screen([pos_x, pos_y, pos_z + 72.0], view_matrix)
+                            if head_pos:
+                                h_y = head_pos[1] * (screen_h / 2)
+                                box_height = max(5.0, sc_y - h_y)
+                                box_width = box_height / 2
+                                
+                                # ОТРИСОВКА ГЕОМЕТРИИ (Твоя кастомная логика GUI)
+                                # Рисуем зеленый квадрат вокруг валидного игрока
+                                draw_list.add_rect(
+                                    sc_x - (box_width / 2), h_y,
+                                    sc_x + (box_width / 2), sc_y,
+                                    imgui.get_color_u32_rgba(0, 1, 0, 1), # Зеленый цвет
+                                    thickness=2.0
+                                )
+                                # Выводим текст здоровья над боксом
+                                imgui.set_cursor_position((sc_x - 10, h_y - 15))
+                                imgui.text_colored(f"{health} HP", 0, 1, 0, 1)
+
+                    except pymem.exception.MemoryReadError:
+                        # Если произошла непредвиденная ошибка чтения конкретного адреса —
+                        # перехватываем её и идем дальше без вылетов программы.
+                        continue
+
+        except pymem.exception.MemoryReadError:
+            # Перехват ошибки чтения базовых структур (например при смене карты)
+            pass
+        except Exception as main_loop_err:
+            # Ловим остальные критические ошибки, чтобы оверлей не падал
+            pass
+
         imgui.end()
-        imgui.render()
-        
         gl.glClearColor(0, 0, 0, 0)
         gl.glClear(gl.GL_COLOR_BUFFER_BIT)
-        impl.render(imgui.get_draw_data())
+        imgui.render()
+        renderer.render(imgui.get_draw_data())
         glfw.swap_buffers(window)
-        
+
+    # Корректное закрытие ресурсов при выходе
+    renderer.shutdown()
     glfw.terminate()
 
 if __name__ == "__main__":
