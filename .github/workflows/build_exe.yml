@@ -37,20 +37,20 @@ jobs:
         Copy-Item "glfw_extracted\glfw-3.4.bin.WIN64\lib-vc2022\glfw3.dll" -Destination "glfw3.dll"
         Write-Host "glfw3.dll placed in root."
 
-    - name: Patch CS2ESP.py (add logging and safe reads)
+    - name: Create patch script (Python)
       run: |
-        # Блок с импортами и функцией log_error
-        $logBlock = @'
-        import sys, os, traceback, datetime
+        @"
+        import re
+
+        log_block = '''import sys, os, traceback, datetime
         log_file = open(os.path.join(os.path.dirname(sys.executable), "cs2esp_errors.log"), "a", encoding="utf-8")
         def log_error(msg):
             timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            log_file.write(f"[{timestamp}] {msg}\n")
+            log_file.write(f"[{timestamp}] {msg}\\n")
             log_file.flush()
-        '@
+        '''
 
-        # Блок с безопасными функциями чтения
-        $safeFuncs = @'
+        safe_funcs = '''
         def safe_read(pm, address):
             try:
                 if address < 0x10000 or address > 0x7FFFFFFFFFFF:
@@ -77,19 +77,28 @@ jobs:
             except Exception as e:
                 log_error(f"safe_read_float failed at {hex(address)}: {e}")
                 return 0.0
-        '@
+        '''
 
-        $script = Get-Content CS2ESP.py -Raw
-        # Вставляем log_block в самое начало
-        $script = $logBlock + "`n" + $script
-        # Вставляем safe functions после строки с import pymem
-        $script = $script -replace "(import pymem\b.*)", "`$1`n" + $safeFuncs
-        # Заменяем опасные вызовы чтения на безопасные
-        $script = $script -replace 'pm\.read_longlong\(', 'safe_read(pm, '
-        $script = $script -replace 'pm\.read_int\(', 'safe_read_int(pm, '
-        $script = $script -replace 'pm\.read_float\(', 'safe_read_float(pm, '
-        Set-Content CS2ESP.py -Value $script
-        Write-Host "Script patched with safe reads and logging."
+        with open("CS2ESP.py", "r", encoding="utf-8") as f:
+            content = f.read()
+
+        content = log_block + "\n" + content
+
+        content = content.replace("import pymem", "import pymem" + safe_funcs)
+
+        content = content.replace("pm.read_longlong(", "safe_read(pm, ")
+        content = content.replace("pm.read_int(", "safe_read_int(pm, ")
+        content = content.replace("pm.read_float(", "safe_read_float(pm, ")
+
+        with open("CS2ESP.py", "w", encoding="utf-8") as f:
+            f.write(content)
+
+        print("Patched successfully.")
+        "@ > patch_script.py
+      shell: pwsh
+
+    - name: Run patch script
+      run: python patch_script.py
 
     - name: Install dependencies
       run: |
