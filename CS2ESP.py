@@ -1,7 +1,7 @@
 import pymem
 import pymem.process
 import win32gui, win32con
-import time, os, json
+import time, os, sys, json
 import imgui
 from imgui.integrations.glfw import GlfwRenderer
 import glfw
@@ -10,14 +10,22 @@ import OpenGL.GL as gl
 WINDOW_WIDTH = 1920
 WINDOW_HEIGHT = 1080
 
-# Загрузка оффсетов из локальной папки
+def resource_path(relative_path):
+    """ Получает абсолютный путь к ресурсам (работает и при сборке в EXE) """
+    try:
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
+
+# Безопасная загрузка оффсетов из папки inside EXE
 try:
-    with open("offsets/offsets.json", "r", encoding="utf-8") as f:
+    with open(resource_path("offsets/offsets.json"), "r", encoding="utf-8") as f:
         offsets = json.load(f)
-    with open("offsets/client_dll.json", "r", encoding="utf-8") as f:
+    with open(resource_path("offsets/client_dll.json"), "r", encoding="utf-8") as f:
         client_dll = json.load(f)
 except FileNotFoundError:
-    # Фолбэк на случай если запустили без папки
+    # Фолбэк на случай если запустили без встроенных файлов
     import requests
     offsets = requests.get('https://raw.githubusercontent.com/a2x/cs2-dumper/main/output/offsets.json').json()
     client_dll = requests.get('https://raw.githubusercontent.com/a2x/cs2-dumper/main/output/client_dll.json').json()
@@ -88,16 +96,15 @@ def esp(draw_list):
             if pm.read_int(entity_pawn + m_lifeState) != 256: continue
             if pm.read_int(entity_pawn + m_iTeamNum) == local_team: continue
 
-            # Получение координат
             game_scene = pm.read_longlong(entity_pawn + m_pGameSceneNode)
             bone_matrix = pm.read_longlong(game_scene + m_modelState + 0x80)
 
-            # Позиция ног (Origin)
+            # Ноги
             pos_x = pm.read_float(entity_pawn + m_vOldOrigin)
             pos_y = pm.read_float(entity_pawn + m_vOldOrigin + 4)
             pos_z = pm.read_float(entity_pawn + m_vOldOrigin + 8)
 
-            # Позиция головы из кости 6
+            # Голова (кость 6)
             head_x = pm.read_float(bone_matrix + 6 * 0x20)
             head_y = pm.read_float(bone_matrix + 6 * 0x20 + 0x4)
             head_z = pm.read_float(bone_matrix + 6 * 0x20 + 0x8)
@@ -107,19 +114,18 @@ def esp(draw_list):
 
             if screen_head[0] == -999 or screen_legs[0] == -999: continue
 
-            # Расчет размеров бокса
             height = abs(screen_head[1] - screen_legs[1])
             width = height / 2
             
             left_x = screen_head[0] - width / 2
             right_x = screen_head[0] + width / 2
 
-            color = imgui.get_color_u32_rgba(1.0, 0.0, 0.0, 1.0) # Красный
+            color = imgui.get_color_u32_rgba(1.0, 0.0, 0.0, 1.0)
             
-            # Отрисовка рамки прямоугольника
+            # Бокс
             draw_list.add_rect(left_x, screen_head[1], right_x, screen_legs[1], color, 0.0, 15, 2.0)
 
-            # Вывод здоровья
+            # HP
             entity_hp = pm.read_int(entity_pawn + m_iHealth)
             draw_list.add_text(left_x - 25, screen_head[1] - 5, color, f"{entity_hp} HP")
         except:
@@ -140,7 +146,6 @@ def main():
 
     hwnd = glfw.get_win32_window(window)
     
-    # Настройка прозрачности через WinAPI клика сквозь окно
     style = win32gui.GetWindowLong(hwnd, win32con.GWL_STYLE)
     style &= ~(win32con.WS_CAPTION | win32con.WS_THICKFRAME | win32con.WS_MINIMIZEBOX | win32con.WS_MAXIMIZEBOX)
     win32gui.SetWindowLong(hwnd, win32con.GWL_STYLE, style)
