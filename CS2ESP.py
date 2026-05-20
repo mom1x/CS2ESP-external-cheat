@@ -9,13 +9,17 @@ import OpenGL.GL as gl
 import imgui
 from imgui.integrations.glfw import GlfwRenderer
 
+# Импортируем системные библиотеки Windows для надежного получения разрешения экрана
+import win32api
+import win32gui
+import win32con
+
 # ==========================================
-# 1. ЗАГРУЗКА ОФФСЕТОВ ИЗ JSON (С УЧЕТОМ PYINSTALLER)
+# 1. ЗАГРУЗКА ОФФСЕТОВ ИЗ JSON
 # ==========================================
 def load_offsets():
     print("[INFO] Загрузка встроенных оффсетов из папки offsets...")
     try:
-        # Если скрипт скомпилирован в EXE, данные лежат в sys._MEIPASS
         if getattr(sys, 'frozen', False):
             base_path = sys._MEIPASS
         else:
@@ -41,7 +45,6 @@ def load_offsets():
     except Exception as e:
         print(f"[ERROR] Не удалось загрузить JSON файлы: {e}")
         print("[INFO] Включаем резервные встроенные оффсеты...")
-        # Запасной хардкод на случай непредвиденных сбоев путей
         return {
             "dwEntityList": 0x18C2DB8, "dwViewMatrix": 0x19242A0, "dwLocalPlayerPawn": 0x1823A08,
             "m_iHealth": 0x32C, "m_hPlayerPawn": 0x7BC, "m_vOldOrigin": 0x1274, "m_iTeamNum": 0x3bf
@@ -74,26 +77,15 @@ def init_overlay():
     glfw.window_hint(glfw.TRANSPARENT_FRAMEBUFFER, glfw.TRUE)
     glfw.window_hint(glfw.MOUSE_PASSTHROUGH, glfw.TRUE)
 
-    monitor = glfw.get_primary_monitor()
+    # Жестко и надежно запрашиваем разрешение экрана у Windows в формате INT
+    screen_w = int(win32api.GetSystemMetrics(0))
+    screen_h = int(win32api.GetSystemMetrics(1))
     
-    # --- МНОГОУРОВНЕВАЯ ПРОВЕРКА РАЗРЕШЕНИЯ ЭКРАНА ---
-    screen_w, screen_h = 1920, 1080 # Значения по умолчанию (фуллхд)
-    try:
-        mode = glfw.get_video_mode(monitor)
-        if hasattr(mode, 'width') and mode.width:
-            screen_w = mode.width
-            screen_h = mode.height
-        else:
-            # Если вернулся кортеж или объект старого типа без атрибута width
-            screen_w = mode[0]
-            screen_h = mode[1]
-    except Exception:
-        try:
-            # Запасной вариант: получаем рабочую область монитора напрямую через API GLFW
-            _, _, screen_w, screen_h = glfw.get_monitor_workarea(monitor)
-        except Exception:
-            pass # Если всё упало, останется базовое разрешение 1920x1080
+    # Подстраховка на случай непредвиденных нулевых значений
+    if screen_w == 0 or screen_h == 0:
+        screen_w, screen_h = 1920, 1080
 
+    # Передаем строго приведенные к int типы данных, чтобы ctypes не ругался
     window = glfw.create_window(screen_w, screen_h, "CS2_OVERLAY", None, None)
     if not window:
         glfw.terminate()
@@ -102,6 +94,11 @@ def init_overlay():
     glfw.make_context_current(window)
     glfw.swap_interval(1)
     
+    # Делаем окно прозрачным на уровне Windows стилей
+    hwnd = glfw.get_win32_window(window)
+    win32gui.SetWindowLong(hwnd, win32con.GWL_EXSTYLE, 
+                           win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE) | win32con.WS_EX_LAYERED | win32con.WS_EX_TRANSPARENT)
+
     imgui.create_context()
     renderer = GlfwRenderer(window)
     return window, renderer, screen_w, screen_h
@@ -137,16 +134,15 @@ def main():
         renderer.process_inputs()
         
         imgui.new_frame()
-        imgui.set_next_window_size(screen_w, screen_h)
+        imgui.set_next_window_size(float(screen_w), float(screen_h))
         imgui.set_next_window_position(0, 0)
         imgui.begin("OverlayWindow", flags=imgui.WINDOW_NO_TITLE_BAR | imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_BACKGROUND | imgui.WINDOW_NO_INPUTS)
         
         draw_list = imgui.get_window_draw_list()
 
         try:
-            # Быстрое и безопасное чтение матрицы (16 флоатов)
+            # Чтение матрицы обзора
             view_matrix = [pm.read_float(client_dll + conf["dwViewMatrix"] + (m_idx * 4)) for m_idx in range(16)]
-
             entity_list = pm.read_longlong(client_dll + conf["dwEntityList"])
             
             if entity_list and entity_list != 0:
