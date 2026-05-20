@@ -1,4 +1,4 @@
-name: Build CS2ESP (no admin, patched pymem)
+name: Build CS2ESP (resilient, no admin)
 
 on:
   workflow_dispatch:
@@ -20,8 +20,8 @@ jobs:
       run: |
         $offsetsUrl = 'https://raw.githubusercontent.com/a2x/cs2-dumper/main/output/offsets.json'
         $clientDllUrl = 'https://raw.githubusercontent.com/a2x/cs2-dumper/main/output/client_dll.json'
-        (Get-Content CS2ESP.py) -replace "https://raw\.githubusercontent\.com/a2x/cs2-dumper/main/output/offsets\.json", $offsetsUrl | Set-Content CS2ESP.py
-        (Get-Content CS2ESP.py) -replace "https://raw\.githubusercontent\.com/a2x/cs2-dumper/main/output/client_dll\.json", $clientDllUrl | Set-Content CS2ESP.py
+        (Get-Content CS2ESP.py) -replace 'https://raw\.githubusercontent\.com/a2x/cs2-dumper/main/output/offsets\.json', $offsetsUrl | Set-Content CS2ESP.py
+        (Get-Content CS2ESP.py) -replace 'https://raw\.githubusercontent\.com/a2x/cs2-dumper/main/output/client_dll\.json', $clientDllUrl | Set-Content CS2ESP.py
         Write-Host "Links updated."
 
     - name: Fix requirements.txt (win32 -> pywin32)
@@ -37,29 +37,65 @@ jobs:
         Copy-Item "glfw_extracted\glfw-3.4.bin.WIN64\lib-vc2022\glfw3.dll" -Destination "glfw3.dll"
         Write-Host "glfw3.dll placed in root."
 
+    - name: Patch CS2ESP.py (add logging and safe reads)
+      run: |
+        # Блок с импортами и функцией log_error
+        $logBlock = @'
+        import sys, os, traceback, datetime
+        log_file = open(os.path.join(os.path.dirname(sys.executable), "cs2esp_errors.log"), "a", encoding="utf-8")
+        def log_error(msg):
+            timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            log_file.write(f"[{timestamp}] {msg}\n")
+            log_file.flush()
+        '@
+
+        # Блок с безопасными функциями чтения
+        $safeFuncs = @'
+        def safe_read(pm, address):
+            try:
+                if address < 0x10000 or address > 0x7FFFFFFFFFFF:
+                    raise ValueError(f"Invalid address: {hex(address)}")
+                return pm.read_longlong(address)
+            except Exception as e:
+                log_error(f"safe_read failed at {hex(address)}: {e}")
+                return 0
+
+        def safe_read_int(pm, address):
+            try:
+                if address < 0x10000 or address > 0x7FFFFFFFFFFF:
+                    raise ValueError(f"Invalid address: {hex(address)}")
+                return pm.read_int(address)
+            except Exception as e:
+                log_error(f"safe_read_int failed at {hex(address)}: {e}")
+                return 0
+
+        def safe_read_float(pm, address):
+            try:
+                if address < 0x10000 or address > 0x7FFFFFFFFFFF:
+                    raise ValueError(f"Invalid address: {hex(address)}")
+                return pm.read_float(address)
+            except Exception as e:
+                log_error(f"safe_read_float failed at {hex(address)}: {e}")
+                return 0.0
+        '@
+
+        $script = Get-Content CS2ESP.py -Raw
+        # Вставляем log_block в самое начало
+        $script = $logBlock + "`n" + $script
+        # Вставляем safe functions после строки с import pymem
+        $script = $script -replace "(import pymem\b.*)", "`$1`n" + $safeFuncs
+        # Заменяем опасные вызовы чтения на безопасные
+        $script = $script -replace 'pm\.read_longlong\(', 'safe_read(pm, '
+        $script = $script -replace 'pm\.read_int\(', 'safe_read_int(pm, '
+        $script = $script -replace 'pm\.read_float\(', 'safe_read_float(pm, '
+        Set-Content CS2ESP.py -Value $script
+        Write-Host "Script patched with safe reads and logging."
+
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
         pip install pyinstaller
-
-    - name: Patch pymem to use minimal process rights (no admin needed)
-      run: |
-        # Ищем файл, где вызывается OpenProcess, и заменяем PROCESS_ALL_ACCESS на PROCESS_VM_READ (0x10)
-        $pymemDir = python -c "import pymem, os; print(os.path.dirname(pymem.__file__))"
-        $processFile = Join-Path $pymemDir "process.py"
-        if (Test-Path $processFile) {
-          (Get-Content $processFile) -replace '0x1FFFFF', '0x10' | Set-Content $processFile
-          Write-Host "pymem process.py patched (PROCESS_ALL_ACCESS -> PROCESS_VM_READ)."
-        } else {
-          Write-Host "process.py not found, searching for other files..."
-          # Если структура иная, заменим во всех .py файлах внутри pymem
-          Get-ChildItem -Path $pymemDir -Filter "*.py" -Recurse | ForEach-Object {
-            (Get-Content $_.FullName) -replace '0x1FFFFF', '0x10' | Set-Content $_.FullName
-          }
-          Write-Host "All pymem files patched."
-        }
-        Write-Host "Patching complete."
 
     - name: Build EXE with PyInstaller (no admin)
       run: |
