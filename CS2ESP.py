@@ -6,20 +6,9 @@ import datetime
 import ctypes
 import struct
 import warnings
-import numpy as np  # Исправлено: numpy обязателен для PyOpenGL
 
-# Окружение
-os.environ['PYOPENGL_PLATFORM'] = 'win32'
-warnings.filterwarnings("ignore", category=UserWarning, module='OpenGL')
-
-# Инициализация консоли
-try:
-    ctypes.windll.kernel32.AllocConsole()
-    sys.stdout = open("CONOUT$", "w", encoding="utf-8")
-    sys.stderr = open("CONOUT$", "w", encoding="utf-8")
-except: pass
-
-# Импорты после инициализации
+# --- ИМПОРТЫ ---
+import numpy as np # Обязательно для PyOpenGL
 import pymem
 import pymem.process
 import glfw
@@ -30,24 +19,35 @@ import win32api
 import win32gui
 import win32con
 
-# Структуры для Windows API
-class MARGINS(ctypes.Structure):
-    _fields_ = [("cxLeftWidth", ctypes.c_int), ("cxRightWidth", ctypes.c_int),
-                ("cyTopHeight", ctypes.c_int), ("cyBottomHeight", ctypes.c_int)]
+# Настройки OpenGL
+os.environ['PYOPENGL_PLATFORM'] = 'win32'
+warnings.filterwarnings("ignore", category=UserWarning, module='OpenGL')
 
-# Глобальные настройки
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# --- ИНИЦИАЛИЗАЦИЯ КОНСОЛИ ---
+try:
+    ctypes.windll.kernel32.AllocConsole()
+    sys.stdout = open("CONOUT$", "w", encoding="utf-8")
+    sys.stderr = open("CONOUT$", "w", encoding="utf-8")
+except: pass
+
+# Определение путей (универсально для .py и .exe)
+if getattr(sys, 'frozen', False):
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 LOG_FILE_PATH = os.path.join(BASE_DIR, "debug_log.txt")
-LIVE_LOGS = ["Engine Starting..."]
 
 def log_message(level, message):
     ts = datetime.datetime.now().strftime("%H:%M:%S")
     formatted = f"[{ts}] [{level.upper()}] {message}"
     print(formatted)
-    LIVE_LOGS.append(formatted)
-    if len(LIVE_LOGS) > 8: LIVE_LOGS.pop(0)
+    try:
+        with open(LOG_FILE_PATH, "a", encoding="utf-8") as f:
+            f.write(formatted + "\n")
+    except: pass
 
-# --- Функции чтения памяти ---
+# --- ФУНКЦИИ ПАМЯТИ ---
 def read_raw(handle, address, size):
     if not address or address < 0x1000: return None
     buf = ctypes.create_string_buffer(size)
@@ -68,59 +68,69 @@ def read_uint(handle, address):
     res = read_raw(handle, address, 4)
     return struct.unpack('I', res)[0] if res else 0
 
-# --- Математика ---
-def world_to_screen(pos, matrix, w_scr, h_scr):
-    w = matrix[12] * pos[0] + matrix[13] * pos[1] + matrix[14] * pos[2] + matrix[15]
-    if w < 0.01: return None
-    x = matrix[0] * pos[0] + matrix[1] * pos[1] + matrix[2] * pos[2] + matrix[3]
-    y = matrix[4] * pos[0] + matrix[5] * pos[1] + matrix[6] * pos[2] + matrix[7]
-    return (w_scr / 2) + (x / w) * (w_scr / 2), (h_scr / 2) - (y / w) * (h_scr / 2)
-
+# --- ЗАГРУЗКА CONFIG ---
 def load_offsets():
+    offsets_dir = os.path.join(BASE_DIR, "offsets")
+    off_path = os.path.join(offsets_dir, "offsets.json")
+    cls_path = os.path.join(offsets_dir, "client_dll.json")
+    
+    log_message("info", f"Looking for config in: {offsets_dir}")
+    
+    if not os.path.exists(off_path) or not os.path.exists(cls_path):
+        log_message("critical", f"JSON FILES NOT FOUND! Checked in: {offsets_dir}")
+        return None
+
     try:
-        with open(os.path.join(BASE_DIR, "offsets/offsets.json"), "r") as f:
-            off = json.load(f)["client.dll"]
-        with open(os.path.join(BASE_DIR, "offsets/client_dll.json"), "r") as f:
-            cls = json.load(f)["client.dll"]["classes"]
+        with open(off_path, "r", encoding="utf-8") as f:
+            raw_offsets = json.load(f)["client.dll"]
+        with open(cls_path, "r", encoding="utf-8") as f:
+            raw_classes = json.load(f)["client.dll"]["classes"]
+            
         return {
-            "dwEntityList": off["dwEntityList"],
-            "dwViewMatrix": off["dwViewMatrix"],
-            "dwLocalPlayerPawn": off["dwLocalPlayerPawn"],
-            "m_iHealth": cls["C_BaseEntity"]["fields"]["m_iHealth"]["value"],
-            "m_hPlayerPawn": cls["CCSPlayerController"]["fields"]["m_hPlayerPawn"]["value"],
-            "m_vOldOrigin": cls["C_BasePlayerPawn"]["fields"]["m_vOldOrigin"]["value"],
-            "m_iTeamNum": cls["C_BasePlayerPawn"]["fields"]["m_iTeamNum"]["value"]
+            "dwEntityList": raw_offsets["dwEntityList"],
+            "dwViewMatrix": raw_offsets["dwViewMatrix"],
+            "dwLocalPlayerPawn": raw_offsets["dwLocalPlayerPawn"],
+            "m_iHealth": raw_classes["C_BaseEntity"]["fields"]["m_iHealth"]["value"],
+            "m_hPlayerPawn": raw_classes["CCSPlayerController"]["fields"]["m_hPlayerPawn"]["value"],
+            "m_vOldOrigin": raw_classes["C_BasePlayerPawn"]["fields"]["m_vOldOrigin"]["value"],
+            "m_iTeamNum": raw_classes["C_BasePlayerPawn"]["fields"]["m_iTeamNum"]["value"]
         }
     except Exception as e:
         log_message("critical", f"JSON Load Error: {e}")
         return None
 
+# --- ГРАФИКА ---
 def init_overlay():
     if not glfw.init(): return None
+    w, h = win32api.GetSystemMetrics(0), win32api.GetSystemMetrics(1)
     glfw.window_hint(glfw.FLOATING, glfw.TRUE)
     glfw.window_hint(glfw.DECORATED, glfw.FALSE)
     glfw.window_hint(glfw.TRANSPARENT_FRAMEBUFFER, glfw.TRUE)
     glfw.window_hint(glfw.MOUSE_PASSTHROUGH, glfw.TRUE)
-    w, h = win32api.GetSystemMetrics(0), win32api.GetSystemMetrics(1)
-    window = glfw.create_window(w, h, "CS2_ESP", None, None)
+    window = glfw.create_window(w, h, "ESP", None, None)
     glfw.make_context_current(window)
     hwnd = glfw.get_win32_window(window)
-    win32gui.SetWindowLong(hwnd, win32con.GWL_EXSTYLE, win32con.WS_EX_LAYERED | win32con.WS_EX_TRANSPARENT | win32con.WS_EX_TOPMOST)
+    ex_style = win32con.WS_EX_LAYERED | win32con.WS_EX_TRANSPARENT | win32con.WS_EX_TOPMOST | win32con.WS_EX_TOOLWINDOW
+    win32gui.SetWindowLong(hwnd, win32con.GWL_EXSTYLE, ex_style)
     imgui.create_context()
     return window, GlfwRenderer(window), w, h
 
+# --- MAIN ---
 def main():
     conf = load_offsets()
-    if not conf: return
-    
+    if not conf:
+        time.sleep(5) # Чтобы успеть прочитать ошибку
+        return
+
     window, renderer, w_scr, h_scr = init_overlay()
     process_handle, client_dll = None, None
+
+    log_message("info", "ESP started. Searching for CS2...")
 
     while not glfw.window_should_close(window):
         glfw.poll_events()
         renderer.process_inputs()
-        
-        # Поиск процесса
+
         if not client_dll:
             for proc in pymem.process.list_processes():
                 if "cs2.exe" in str(proc.szExeFile).lower():
@@ -130,29 +140,28 @@ def main():
                     pm.process_id = pid
                     try:
                         client_dll = pymem.process.module_from_name(pm.process_handle, "client.dll").lpBaseOfDll
-                        log_message("info", f"Connected. Base: {hex(client_dll)}")
+                        log_message("info", f"Found CS2! PID: {pid}, Client.dll: {hex(client_dll)}")
                     except: pass
                     break
 
         imgui.new_frame()
         imgui.set_next_window_size(float(w_scr), float(h_scr))
         imgui.set_next_window_position(0.0, 0.0)
-        imgui.begin("ESP", flags=imgui.WINDOW_NO_TITLE_BAR | imgui.WINDOW_NO_BACKGROUND | imgui.WINDOW_NO_INPUTS)
+        imgui.begin("ESP_OVERLAY", flags=imgui.WINDOW_NO_TITLE_BAR | imgui.WINDOW_NO_BACKGROUND | imgui.WINDOW_NO_INPUTS)
         draw_list = imgui.get_window_draw_list()
         
         targets = 0
         if client_dll:
             try:
-                matrix_raw = read_raw(process_handle, client_dll + conf["dwViewMatrix"], 64)
-                view_matrix = list(struct.unpack('16f', matrix_raw))
                 entity_list = read_longlong(process_handle, client_dll + conf["dwEntityList"])
                 local_pawn = read_longlong(process_handle, client_dll + conf["dwLocalPlayerPawn"])
-
+                
                 for i in range(1, 64):
                     list_entry = read_longlong(process_handle, entity_list + (8 * ((i & 0x7FFF) >> 9) + 16))
                     if not list_entry: continue
                     controller = read_longlong(process_handle, list_entry + (120 * (i & 0x1FF)))
                     if not controller: continue
+                    
                     pawn_handle = read_uint(process_handle, controller + conf["m_hPlayerPawn"])
                     if not pawn_handle: continue
                     
@@ -163,10 +172,9 @@ def main():
                         health = read_int(process_handle, pawn_ptr + conf["m_iHealth"])
                         if 0 < health <= 100:
                             targets += 1
-                            # Здесь будет ваша отрисовка (add_rect и т.д.)
             except: pass
 
-        draw_list.add_text(20, 20, 0xFFFFFFFF, f"Targets: {targets}")
+        draw_list.add_text(20, 20, 0xFFFFFFFF, f"Targets found: {targets}")
         imgui.end()
         
         gl.glClear(gl.GL_COLOR_BUFFER_BIT)
