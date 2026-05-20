@@ -1,48 +1,33 @@
-name: Build CS2 ESP
+name: Build ESP Project
 
 on:
   push:
     branches: [ "main" ]
-  workflow_dispatch:
 
 jobs:
   build:
-    runs-on: windows-latest
+    runs-on: windows-latest # Важно: собираем именно на Windows, чтобы не было проблем с путями
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+    - uses: actions/checkout@v4
 
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
         python-version: '3.10'
-        cache: 'pip'
 
-    - name: Install dependencies
+    - name: Install Dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install -r requirements.txt
-        pip install pyinstaller
+        pip install pymem pywin32 glfw PyOpenGL PyOpenGL-accelerate imgui[glfw] pyinstaller
 
-    - name: Download fresh offsets
+    - name: Build with PyInstaller
       run: |
-        mkdir -p offsets
-        curl -o offsets/offsets.json https://raw.githubusercontent.com/a2x/cs2-dumper/main/output/offsets.json
-        curl -o offsets/client_dll.json https://raw.githubusercontent.com/a2x/cs2-dumper/main/output/client_dll.json
+        # Главный секрет: --hidden-import для платформы OpenGL и отключение UAC-требований
+        pyinstaller --onefile --noconsole --hidden-import=OpenGL.platform.win32 --name CS2ESP CS2ESP.py
 
-    - name: Download and Extract GLFW Binary
-      run: |
-        curl -L -o glfw.zip https://github.com/glfw/glfw/releases/download/3.4/glfw-3.4.bin.WIN64.zip
-        tar -xf glfw.zip
-        copy glfw-3.4.bin.WIN64\lib-vc2022\glfw3.dll .
-
-    - name: Compile to EXE with PyInstaller
-      run: |
-        python -m PyInstaller --noconfirm --onefile --add-data "offsets/offsets.json;offsets" --add-data "offsets/client_dll.json;offsets" --add-binary "glfw3.dll;." CS2ESP.py
-
-    - name: Upload Build Artifact
+    - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: CS2-ESP-Executable
+        name: CS2ESP-Build
         path: dist/CS2ESP.exe
