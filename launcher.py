@@ -13,10 +13,40 @@ def log_error(msg):
     log_file.write(f"[{ts}] {msg}\n")
     log_file.flush()
 
-# ================= ПЕРЕХВАТ ЗАГРУЗКИ ОФФСЕТОВ =================
-# Папка offsets должна лежать рядом с EXE и содержать offsets.json и client_dll.json
+# ================= АВТООБНОВЛЕНИЕ ОФФСЕТОВ =================
 OFFSETS_DIR = os.path.join(os.path.dirname(sys.executable), "offsets")
+os.makedirs(OFFSETS_DIR, exist_ok=True)
 
+OFFSETS_URL = "https://raw.githubusercontent.com/a2x/cs2-dumper/main/output/offsets.json"
+CLIENT_DLL_URL = "https://raw.githubusercontent.com/a2x/cs2-dumper/main/output/client_dll.json"
+
+def download_fresh_offsets():
+    try:
+        r = requests.get(OFFSETS_URL, timeout=5)
+        if r.status_code == 200:
+            with open(os.path.join(OFFSETS_DIR, "offsets.json"), "w", encoding="utf-8") as f:
+                f.write(r.text)
+            log_error("Successfully downloaded fresh offsets.json")
+        else:
+            log_error(f"Failed to download offsets.json, status {r.status_code}")
+    except Exception as e:
+        log_error(f"Exception downloading offsets.json: {e}")
+
+    try:
+        r = requests.get(CLIENT_DLL_URL, timeout=5)
+        if r.status_code == 200:
+            with open(os.path.join(OFFSETS_DIR, "client_dll.json"), "w", encoding="utf-8") as f:
+                f.write(r.text)
+            log_error("Successfully downloaded fresh client_dll.json")
+        else:
+            log_error(f"Failed to download client_dll.json, status {r.status_code}")
+    except Exception as e:
+        log_error(f"Exception downloading client_dll.json: {e}")
+
+# Скачиваем актуальные JSON'ы при запуске (если есть интернет)
+download_fresh_offsets()
+
+# ================= ПЕРЕХВАТ ЗАГРУЗКИ ОФФСЕТОВ =================
 original_get = requests.get
 def patched_get(url, *args, **kwargs):
     if "raw.githubusercontent.com/a2x/cs2-dumper/main/output/offsets.json" in url:
@@ -41,7 +71,6 @@ def patched_get(url, *args, **kwargs):
             return resp
         else:
             log_error(f"Local client_dll.json not found at {local_path}")
-    # Если URL не совпадает – обычный запрос в интернет (на всякий случай)
     return original_get(url, *args, **kwargs)
 
 requests.get = patched_get
