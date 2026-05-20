@@ -6,7 +6,7 @@ on:
 
 jobs:
   build:
-    runs-on: windows-latest # Важно: собираем именно на Windows, чтобы не было проблем с путями
+    runs-on: windows-latest
 
     steps:
     - uses: actions/checkout@v4
@@ -23,8 +23,8 @@ jobs:
 
     - name: Build with PyInstaller
       run: |
-        # Главный секрет: --hidden-import для платформы OpenGL и отключение UAC-требований
-        pyinstaller --onefile --noconsole --hidden-import=OpenGL.platform.win32 --name CS2ESP CS2ESP.py
+        # --collect-all glfw принудительно зашьёт glfw3.dll внутрь готового .exe
+        pyinstaller --onefile --noconsole --hidden-import=OpenGL.platform.win32 --collect-all glfw --name CS2ESP CS2ESP.py
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
