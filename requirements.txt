@@ -4,3 +4,4 @@ imgui[full]
 glfw
 PyOpenGL
 pywin32
+numpy
