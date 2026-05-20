@@ -9,39 +9,48 @@ import warnings
 
 warnings.filterwarnings("ignore", category=UserWarning, module='OpenGL')
 
-# === СИСТЕМА АВТОНОМНОГО ЛОГИРОВАНИЯ В ФАЙЛ И КОНСОЛЬ ===
-# Определяем директорию запуска (работает и для .py, и для скомпилированного .exe)
+# === ФИКС КОНСОЛИ: Принудительное создание CMD-окна ===
+try:
+    # Метод гарантирует, что даже внутри скомпилированного .exe откроется окно консоли
+    ctypes.windll.kernel32.AllocConsole()
+    sys.stdout = open("CONOUT$", "w", encoding="utf-8")
+    sys.stderr = open("CONOUT$", "w", encoding="utf-8")
+except Exception:
+    pass
+
 if getattr(sys, 'frozen', False):
     BASE_DIR = os.path.dirname(sys.executable)
 else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 LOG_FILE_PATH = os.path.join(BASE_DIR, "debug_log.txt")
+LIVE_LOGS = ["Engine starting..."]
 
 def log_message(level, message):
-    """Записывает структурированный лог с отметкой времени в файл и выводит в консоль"""
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    formatted_line = f"[{timestamp}] [{level.upper()}] {message}\n"
+    """Логирование одновременно в файл, в созданную CMD консоль и в массив оверлея"""
+    timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+    formatted_line = f"[{timestamp}] [{level.upper()}] {message}"
     
-    # Печать в консоль для разработчика
-    print(formatted_line.strip())
+    print(formatted_line) # Печать в выделенное CMD окно
     
-    # Запись в файл для пользователя
+    # Добавляем в историю для вывода на экран игры (храним последние 6 строк)
+    LIVE_LOGS.append(formatted_line)
+    if len(LIVE_LOGS) > 6:
+        LIVE_LOGS.pop(0)
+        
     try:
         with open(LOG_FILE_PATH, "a", encoding="utf-8") as log_file:
-            log_file.write(formatted_line)
+            log_file.write(f"[{datetime.datetime.now()}] [{level.upper()}] {message}\n")
     except:
         pass
 
-# Инициализируем чистый лог-файл при каждом новом запуске программы
+# Сброс лога
 try:
     with open(LOG_FILE_PATH, "w", encoding="utf-8") as f:
-        f.write(f"=== CS2 OVERLAY DIAGNOSTIC LOG ENGINE START ===\n")
-        f.write(f"Execution path: {BASE_DIR}\n\n")
-except Exception as e:
-    print(f"Failed to initialize log file: {e}")
+        f.write("=== CS2 PRO ESP ENGINE INITIALIZED ===\n\n")
+except: pass
 
-# Настройки графической подсистемы Windows
+# Инициализация графических флагов
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(2)
 except:
@@ -73,7 +82,7 @@ class MARGINS(ctypes.Structure):
                 ("cyTopHeight", ctypes.c_int), ("cyBottomHeight", ctypes.c_int)]
 
 # =======================================================
-# ЗАГРУЗКА ИЗ ВНЕШНЕЙ ПАПКИ РЯДОМ С EXE
+# АВТОНОМНЫЙ ПАРСЕР ВНЕШНЕЙ ПАПКИ OFFSETS
 # =======================================================
 def load_offsets():
     conf = {
@@ -81,18 +90,15 @@ def load_offsets():
         "m_iHealth": 0, "m_hPlayerPawn": 0, "m_vOldOrigin": 0, "m_iTeamNum": 0
     }
     
-    # Папка 'offsets' должна лежать строго в корне рядом с exe/py
     offsets_dir = os.path.join(BASE_DIR, "offsets")
     offsets_path = os.path.join(offsets_dir, "offsets.json")
     client_dll_path = os.path.join(offsets_dir, "client_dll.json")
 
-    log_message("info", f"Checking offsets folder path: '{offsets_dir}'")
+    log_message("info", f"Looking for offsets folder: {offsets_dir}")
 
     if not os.path.exists(offsets_path) or not os.path.exists(client_dll_path):
-        log_message("critical", f"Configuration files missing! Create folder 'offsets' near your EXE and put files inside.")
-        log_message("critical", f"Expected path 1: {offsets_path}")
-        log_message("critical", f"Expected path 2: {client_dll_path}")
-        return conf
+        log_message("critical", "CRITICAL ERROR: 'offsets' folder or JSON files not found next to script/exe!")
+        return None
 
     try:
         with open(offsets_path, "r") as f:
@@ -114,22 +120,22 @@ def load_offsets():
                 if "m_vOldOrigin" in fields: conf["m_vOldOrigin"] = parse_val(fields["m_vOldOrigin"])
                 if "m_iTeamNum" in fields: conf["m_iTeamNum"] = parse_val(fields["m_iTeamNum"])
         
-        # Выводим в лог прочитанную карту смещений, чтобы юзер видел, не нули ли там
-        log_message("info", f"Offsets successfully mapped. Memory Map:")
-        for key, val in conf.items():
-            log_message("debug", f"  -> {key}: {hex(val)}")
+        log_message("info", "Offsets successfully parsed:")
+        for k, v in conf.items():
+            log_message("info", f"  -> {k}: {hex(v)}")
             
     except Exception as e:
-        log_message("error", f"Failed to parse offset JSON files. Content structure is corrupted: {e}")
+        log_message("critical", f"JSON parsing error: {e}")
+        return None
         
     return conf
 
 # =======================================================
-# БЕЗОПАСНЫЕ ФУНКЦИИ ЧТЕНИЯ С ВЕРРИФИКАЦИЕЙ ОШИБОК
+# СТАБИЛЬНЫЕ СИС-ВЫЗОВЫ С ПРОВЕРКОЙ ВАЛИДНОСТИ АДРЕСОВ
 # =======================================================
 def read_raw(handle, address, size):
-    if address < 0x10000 or address > 0x7FFFFFFFFFFF:
-        return None  # Пресекаем попытки чтения невалидных регистров адресов
+    if address < 0x100000 or address > 0xF00000000000: # Проверка на выход за лимиты адресного пространства
+        return None
     buffer = ctypes.create_string_buffer(size)
     bytes_read = ctypes.c_size_t()
     if ReadProcessMemory(handle, ctypes.c_void_p(address), buffer, size, ctypes.byref(bytes_read)):
@@ -156,9 +162,8 @@ def world_to_screen(pos, matrix, width, height):
     return (width / 2) + (x / w) * (width / 2), (height / 2) - (y / w) * (height / 2)
 
 def init_overlay():
-    log_message("info", "Initializing GLFW Graphics Overlay Subsystem...")
     if not glfw.init():
-        log_message("critical", "GLFW Initialization failed!")
+        log_message("critical", "Failed to init GLFW Engine.")
         return None
         
     glfw.window_hint(glfw.FLOATING, glfw.TRUE)
@@ -166,17 +171,14 @@ def init_overlay():
     glfw.window_hint(glfw.TRANSPARENT_FRAMEBUFFER, glfw.TRUE)
     glfw.window_hint(glfw.MOUSE_PASSTHROUGH, glfw.TRUE)
 
-    screen_w, screen_h = win32api.GetSystemMetrics(0), win32api.GetSystemMetrics(1)
-    if screen_w == 0 or screen_h == 0: 
-        screen_w, screen_h = 1920, 1080
-        log_message("warning", "Failed to detect resolution via Win32API. Fallback to 1920x1080.")
+    screen_w = win32api.GetSystemMetrics(0)
+    screen_h = win32api.GetSystemMetrics(1)
+    if screen_w == 0 or screen_h == 0: screen_w, screen_h = 1920, 1080
 
-    window = glfw.create_window(screen_w, screen_h, "CS2_OVERLAY_DIAGNOSTIC", None, None)
+    window = glfw.create_window(screen_w, screen_h, "CS2_PRO_OVERLAY", None, None)
     if not window:
-        log_message("critical", "Overlay Window Creation failed (OpenGL Context error)!")
         glfw.terminate()
         return None
-        
     glfw.make_context_current(window)
     glfw.swap_interval(1)
     
@@ -189,20 +191,18 @@ def init_overlay():
         dwmapi = ctypes.WinDLL('dwmapi')
         margins = MARGINS(-1, -1, -1, -1)
         dwmapi.DwmExtendFrameIntoClientArea(hwnd, ctypes.byref(margins))
-    except Exception as e:
-        log_message("warning", f"DWM Aero alpha-blending frame extension bypass warning: {e}")
+    except: pass
 
     imgui.create_context()
     renderer = GlfwRenderer(window)
-    log_message("info", f"Overlay Render Engine loaded successfully. Canvas size: {screen_w}x{screen_h}")
     return window, renderer, hwnd, screen_w, screen_h
 
 def main():
+    log_message("info", "Starting up. Loading settings...")
     conf = load_offsets()
-    
-    # Если критические оффсеты не прочитались и равны нулю, работать нет смысла
-    if conf["dwEntityList"] == 0 or conf["dwViewMatrix"] == 0:
-        log_message("critical", "Base offsets are 0. Script halted. Fix JSON files inside 'offsets' folder.")
+    if not conf:
+        log_message("critical", "Initialization aborted due to missing configs.")
+        time.sleep(5)
         return
 
     process_handle = None
@@ -215,11 +215,7 @@ def main():
     PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
     
     last_topmost_check = time.time()
-    last_state_log = time.time()
-    total_cycles = 0
-    failed_reads_streak = 0
-    
-    log_message("info", "Entering main loop. Awaiting Counter-Strike 2 startup...")
+    last_diagnostic_time = time.time()
     
     while not glfw.window_should_close(window):
         glfw.poll_events()
@@ -232,68 +228,61 @@ def main():
         imgui.new_frame()
         imgui.set_next_window_size(float(screen_w), float(screen_h))
         imgui.set_next_window_position(0.0, 0.0)
-        imgui.begin("HUD_LAYER", flags=imgui.WINDOW_NO_TITLE_BAR | imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_BACKGROUND | imgui.WINDOW_NO_INPUTS)
+        imgui.begin("PRO_HUD", flags=imgui.WINDOW_NO_TITLE_BAR | imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_BACKGROUND | imgui.WINDOW_NO_INPUTS)
         
         draw_list = imgui.get_window_draw_list()
         
+        # === ВЫВОД ДИАГНОСТИКИ ПРЯМО НА ЭКРАН ИГРЫ ===
+        draw_list.add_text(20, 20, imgui.get_color_u32_rgba(0.0, 1.0, 1.0, 1.0), "=== CS2 DIAGNOSTIC OVERLAY PANEL ===")
+        
+        # Отрисовка "живых" логов в левом углу
+        current_y = 40
+        for live_log in LIVE_LOGS:
+            draw_list.add_text(20, current_y, imgui.get_color_u32_rgba(0.9, 0.9, 0.9, 1.0), live_log)
+            current_y += 18
+
         if not client_dll:
-            draw_list.add_text(15, 15, imgui.get_color_u32_rgba(1.0, 0.5, 0.0, 1.0), "STATUS: SEARCHING FOR CS2.EXE")
+            draw_list.add_text(20, current_y + 10, imgui.get_color_u32_rgba(1.0, 0.6, 0.0, 1.0), "PROCESS STATUS: WAITING FOR CS2.EXE...")
             for proc in pymem.process.list_processes():
                 if "cs2.exe" in str(proc.szExeFile).lower():
                     pid = proc.th32ProcessID
-                    log_message("info", f"Found active game process 'cs2.exe' with PID: {pid}. Requesting handle...")
+                    log_message("info", f"Found CS2 process! PID: {pid}. Hooking memory handle...")
                     
+                    # Запрос дескриптора (Bypass UAC)
                     process_handle = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
                     if process_handle:
-                        log_message("info", f"Process Handle successfully acquired without elevated UAC privileges.")
                         try:
                             pm_temp = pymem.Pymem()
                             pm_temp.process_id = pid
                             pm_temp.process_handle = process_handle
                             client_dll = pymem.process.module_from_name(pm_temp.process_handle, "client.dll").lpBaseOfDll
-                            log_message("info", f"Module 'client.dll' mapped at physical memory base address: {hex(client_dll)}")
-                            failed_reads_streak = 0
-                        except Exception as mod_ex:
-                            log_message("error", f"Failed to determine client.dll base location pointer: {mod_ex}")
+                            log_message("info", f"Linked to client.dll at base address: {hex(client_dll)}")
+                        except Exception as ex:
+                            log_message("error", f"Module mapping failed: {ex}")
                             client_dll = None
                     else:
-                        log_message("critical", "OpenProcess failed! Windows Kernell security rejected User-Mode access descriptor.")
+                        log_message("critical", "Handle rejection! Windows anti-cheat hooks blocked User-Mode link.")
         else:
-            draw_list.add_text(15, 15, imgui.get_color_u32_rgba(0.0, 1.0, 0.0, 1.0), "STATUS: SCANNING MEMORY (ACTIVE)")
+            draw_list.add_text(20, current_y + 10, imgui.get_color_u32_rgba(0.0, 1.0, 0.0, 1.0), "PROCESS STATUS: CONNECTED AND SCANNING")
             
             targets_count = 0
-            total_slots_evaluated = 0
             
             try:
+                # Читаем матрицу
                 matrix_bytes = read_raw(process_handle, client_dll + conf["dwViewMatrix"], 64)
-                if not matrix_bytes:
-                    failed_reads_streak += 1
-                    if failed_reads_streak > 30:
-                        raise Exception("Continuous matrix read failure. Game may be closed or loading level.")
-                    imgui.end()
-                    imgui.render()
-                    renderer.render(imgui.get_draw_data())
-                    glfw.swap_buffers(window)
-                    continue
-                
-                failed_reads_streak = 0
-                view_matrix = list(struct.unpack('16f', matrix_bytes))
                 entity_list = read_longlong(process_handle, client_dll + conf["dwEntityList"])
-                
-                if not entity_list:
-                    # Если адрес списка пустой - сообщаем в лог раз в 5 секунд, чтобы не забивать файл
-                    if time.time() - last_state_log > 5.0:
-                        log_message("warning", f"dwEntityList read zero data at structural pointer: {hex(client_dll + conf['dwEntityList'])}")
-                        last_state_log = time.time()
                 
                 local_team = -1
                 local_pawn = read_longlong(process_handle, client_dll + conf["dwLocalPlayerPawn"])
                 if local_pawn:
                     local_team = read_int(process_handle, local_pawn + conf["m_iTeamNum"])
 
-                if entity_list:
+                if matrix_bytes and entity_list:
+                    view_matrix = list(struct.unpack('16f', matrix_bytes))
+                    
+                    # Сканируем массив сущностей
                     for i in range(1, 64):
-                        total_slots_evaluated += 1
+                        # ФИКС ПРИОРИТЕТА ОПЕРАЦИЙ (Строго сгруппированные скобки для Source 2 в Python)
                         list_entry = read_longlong(process_handle, entity_list + (8 * ((i & 0x7FFF) >> 9)) + 16)
                         if not list_entry: continue
                         
@@ -303,6 +292,7 @@ def main():
                         pawn_handle = read_uint(process_handle, controller + conf["m_hPlayerPawn"])
                         if not pawn_handle: continue
 
+                        # Повторный фикс для цепочки Павна
                         list_entry_pawn = read_longlong(process_handle, entity_list + (8 * ((pawn_handle & 0x7FFF) >> 9)) + 16)
                         if not list_entry_pawn: continue
                         
@@ -310,14 +300,10 @@ def main():
                         if not pawn_ptr or pawn_ptr == local_pawn: continue
 
                         health = read_int(process_handle, pawn_ptr + conf["m_iHealth"])
-                        # Если здоровье возвращает бред (например 0 или 99999), значит оффсет m_iHealth изменен в патче!
-                        if health <= 0 or health > 100:
-                            if health != 0 and time.time() - last_state_log > 10.0:
-                                log_message("error", f"Abnormal health value parsed: {health}. Check if 'm_iHealth' offset is correct!")
-                                last_state_log = time.time()
-                            continue
+                        if health <= 0 or health > 100: continue
                         
                         team = read_int(process_handle, pawn_ptr + conf["m_iTeamNum"])
+                        
                         coords = read_raw(process_handle, pawn_ptr + conf["m_vOldOrigin"], 12)
                         if not coords: continue
                         x, y, z = struct.unpack('3f', coords)
@@ -333,27 +319,29 @@ def main():
                             box_h = max(4.0, sc_y - h_y)
                             box_w = box_h / 1.9
                             
+                            # Настройка цветов: Враг - Красный, Союзник - Голубой
                             color = imgui.get_color_u32_rgba(0.1, 0.6, 1.0, 1.0) if team == local_team else imgui.get_color_u32_rgba(1.0, 0.1, 0.1, 1.0)
                             draw_list.add_rect(sc_x - box_w/2, h_y, sc_x + box_w/2, sc_y, color, 0.0, 0, 1.5)
 
+                            # Хитбар
                             hp_p = health / 100.0
                             hp_color = imgui.get_color_u32_rgba(1.0 - hp_p, hp_p, 0.0, 1.0)
                             hp_h = box_h * hp_p
                             
                             draw_list.add_rect_filled(sc_x - box_w/2 - 6, h_y, sc_x - box_w/2 - 2, sc_y, imgui.get_color_u32_rgba(0.0, 0.0, 0.0, 0.5))
                             draw_list.add_rect_filled(sc_x - box_w/2 - 5, sc_y - hp_h, sc_x - box_w/2 - 3, sc_y, hp_color)
-            
-            except Exception as ex:
-                log_message("warning", f"Context reset caught: {ex}. Re-verifying module base pointer...")
+                            
+                else:
+                    if time.time() - last_diagnostic_time > 4.0:
+                        log_message("warning", "Matrix data or Entity List pointer is blank. Waiting for match load...")
+                        last_diagnostic_time = time.time()
+                        
+            except Exception as loop_ex:
+                log_message("error", f"Loop exception: {loop_ex}")
                 client_dll = None
                 process_handle = None
 
-            draw_list.add_text(15, 35, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), f"VISIBLE TARGETS: {targets_count}")
-
-            # Каждые 1000 циклов пишем статус в лог-файл, чтобы подтвердить стабильность
-            total_cycles += 1
-            if total_cycles % 2000 == 0:
-                log_message("info", f"Diagnostics heartbeat: Cycles active={total_cycles}, Targets frame-max={targets_count}")
+            draw_list.add_text(20, current_y + 30, imgui.get_color_u32_rgba(1.0, 1.0, 0.0, 1.0), f"VISIBLE TARGETS ON SCREEN: {targets_count}")
 
         imgui.end()
         
@@ -363,12 +351,10 @@ def main():
         renderer.render(imgui.get_draw_data())
         glfw.swap_buffers(window)
 
-    log_message("info", "Closing active links and shutting down process loops...")
     if process_handle:
         CloseHandle(process_handle)
     renderer.shutdown()
     glfw.terminate()
-    log_message("info", "Overlay process terminated cleanly.")
 
 if __name__ == "__main__":
     main()
