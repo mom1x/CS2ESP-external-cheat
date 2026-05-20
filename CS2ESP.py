@@ -9,16 +9,28 @@ import OpenGL.GL as gl
 import imgui
 from imgui.integrations.glfw import GlfwRenderer
 
-# Импортируем системные библиотеки Windows для надежного получения разрешения экрана
+# Системные библиотеки для работы с окнами Windows
 import win32api
 import win32gui
 import win32con
 
 # ==========================================
-# 1. ЗАГРУЗКА ОФФСЕТОВ ИЗ JSON
+# 1. УМНАЯ ЗАГРУЗКА И СКАНИРОВАНИЕ ОФФСЕТОВ
 # ==========================================
 def load_offsets():
     print("[INFO] Загрузка встроенных оффсетов из папки offsets...")
+    
+    # Дефолтные базовые значения на случай сбоя файловой системы
+    offsets_dict = {
+        "dwEntityList": 0x18C2DB8, 
+        "dwViewMatrix": 0x19242A0, 
+        "dwLocalPlayerPawn": 0x1823A08,
+        "m_iHealth": 0x32C, 
+        "m_hPlayerPawn": 0x7BC, 
+        "m_vOldOrigin": 0x1274, 
+        "m_iTeamNum": 0x3BF
+    }
+
     try:
         if getattr(sys, 'frozen', False):
             base_path = sys._MEIPASS
@@ -28,30 +40,37 @@ def load_offsets():
         offsets_path = os.path.join(base_path, "offsets", "offsets.json")
         client_dll_path = os.path.join(base_path, "offsets", "client_dll.json")
 
-        with open(offsets_path, "r") as f:
-            offsets = json.load(f)["client.dll"]
-        with open(client_dll_path, "r") as f:
-            client_data = json.load(f)["client.dll"]["classes"]
+        if os.path.exists(offsets_path) and os.path.exists(client_dll_path):
+            with open(offsets_path, "r") as f:
+                raw_offsets = json.load(f)["client.dll"]
+            with open(client_dll_path, "r") as f:
+                raw_classes = json.load(f)["client.dll"]["classes"]
 
-        return {
-            "dwEntityList": offsets["dwEntityList"],
-            "dwViewMatrix": offsets["dwViewMatrix"],
-            "dwLocalPlayerPawn": offsets["dwLocalPlayerPawn"],
-            "m_iHealth": client_data.get("C_BaseEntity", {}).get("fields", {}).get("m_iHealth", 0x32C),
-            "m_hPlayerPawn": client_data.get("CCSPlayerController", {}).get("fields", {}).get("m_hPlayerPawn", 0x7BC),
-            "m_vOldOrigin": client_data.get("C_BasePlayerPawn", {}).get("fields", {}).get("m_vOldOrigin", 0x1274),
-            "m_iTeamNum": client_data.get("C_BaseEntity", {}).get("fields", {}).get("m_iTeamNum", 0x3bf)
-        }
+            # Забираем глобальные адреса
+            offsets_dict["dwEntityList"] = raw_offsets.get("dwEntityList", offsets_dict["dwEntityList"])
+            offsets_dict["dwViewMatrix"] = raw_offsets.get("dwViewMatrix", offsets_dict["dwViewMatrix"])
+            offsets_dict["dwLocalPlayerPawn"] = raw_offsets.get("dwLocalPlayerPawn", offsets_dict["dwLocalPlayerPawn"])
+
+            # Умный поиск внутренних смещений по всем классам (защита от переименований классов Valve)
+            for class_name, class_body in raw_classes.items():
+                fields = class_body.get("fields", {})
+                if "m_iHealth" in fields:
+                    offsets_dict["m_iHealth"] = fields["m_iHealth"]
+                if "m_hPlayerPawn" in fields:
+                    offsets_dict["m_hPlayerPawn"] = fields["m_hPlayerPawn"]
+                if "m_vOldOrigin" in fields:
+                    offsets_dict["m_vOldOrigin"] = fields["m_vOldOrigin"]
+                if "m_iTeamNum" in fields:
+                    offsets_dict["m_iTeamNum"] = fields["m_iTeamNum"]
+            
+            print("[SUCCESS] Оффсеты успешно сопоставлены из актуального JSON!")
     except Exception as e:
-        print(f"[ERROR] Не удалось загрузить JSON файлы: {e}")
-        print("[INFO] Включаем резервные встроенные оффсеты...")
-        return {
-            "dwEntityList": 0x18C2DB8, "dwViewMatrix": 0x19242A0, "dwLocalPlayerPawn": 0x1823A08,
-            "m_iHealth": 0x32C, "m_hPlayerPawn": 0x7BC, "m_vOldOrigin": 0x1274, "m_iTeamNum": 0x3bf
-        }
+        print(f"[WARN] Ошибка парсинга JSON (используем базовый кэш): {e}")
+        
+    return offsets_dict
 
 # ==========================================
-# 2. МАТЕМАТИКА (WORLD TO SCREEN)
+# 2. МАТЕМАТИКАМ ПЕРЕВОДА КООРДИНАТ (W2S)
 # ==========================================
 def world_to_screen(pos, matrix):
     w = matrix[12] * pos[0] + matrix[13] * pos[1] + matrix[14] * pos[2] + matrix[15]
@@ -66,7 +85,7 @@ def world_to_screen(pos, matrix):
     return screen_x, screen_y
 
 # ==========================================
-# 3. ИНИЦИАЛИЗАЦИЯ GLFW И ЗАЩИЩЕННЫЙ ОВЕРЛЕЙ
+# 3. НАДЕЖНАЯ ИНИЦИАЛИЗАЦИЯ ИНТЕРФЕЙСА
 # ==========================================
 def init_overlay():
     if not glfw.init():
@@ -77,16 +96,13 @@ def init_overlay():
     glfw.window_hint(glfw.TRANSPARENT_FRAMEBUFFER, glfw.TRUE)
     glfw.window_hint(glfw.MOUSE_PASSTHROUGH, glfw.TRUE)
 
-    # Жестко и надежно запрашиваем разрешение экрана у Windows в формате INT
     screen_w = int(win32api.GetSystemMetrics(0))
     screen_h = int(win32api.GetSystemMetrics(1))
     
-    # Подстраховка на случай непредвиденных нулевых значений
     if screen_w == 0 or screen_h == 0:
         screen_w, screen_h = 1920, 1080
 
-    # Передаем строго приведенные к int типы данных, чтобы ctypes не ругался
-    window = glfw.create_window(screen_w, screen_h, "CS2_OVERLAY", None, None)
+    window = glfw.create_window(screen_w, screen_h, "CS2_PRO_OVERLAY", None, None)
     if not window:
         glfw.terminate()
         return None
@@ -94,7 +110,6 @@ def init_overlay():
     glfw.make_context_current(window)
     glfw.swap_interval(1)
     
-    # Делаем окно прозрачным на уровне Windows стилей
     hwnd = glfw.get_win32_window(window)
     win32gui.SetWindowLong(hwnd, win32con.GWL_EXSTYLE, 
                            win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE) | win32con.WS_EX_LAYERED | win32con.WS_EX_TRANSPARENT)
@@ -104,7 +119,7 @@ def init_overlay():
     return window, renderer, screen_w, screen_h
 
 # ==========================================
-# 4. ОСНОВНОЙ ПРОЦЕСС И БЕЗОПАСНЫЙ ЦИКЛ
+# 4. АКТУАЛЬНЫЙ АНАЛИЗАТОР ПАМЯТИ И ЦИКЛ ESP
 # ==========================================
 def main():
     conf = load_offsets()
@@ -126,7 +141,6 @@ def main():
 
     window, renderer, screen_w, screen_h = init_overlay()
     if not window:
-        print("[ERROR] Не удалось создать окно ImGui оверлея.")
         return
 
     while not glfw.window_should_close(window):
@@ -141,18 +155,27 @@ def main():
         draw_list = imgui.get_window_draw_list()
 
         try:
-            # Чтение матрицы обзора
+            # Читаем матрицу камери (16 float значений)
             view_matrix = [pm.read_float(client_dll + conf["dwViewMatrix"] + (m_idx * 4)) for m_idx in range(16)]
             entity_list = pm.read_longlong(client_dll + conf["dwEntityList"])
             
+            # Получаем локального игрока, чтобы определить его команду
+            local_player_pawn = pm.read_longlong(client_dll + conf["dwLocalPlayerPawn"])
+            local_team = pm.read_int(local_player_pawn + conf["m_iTeamNum"]) if local_player_pawn else -1
+
             if entity_list and entity_list != 0:
-                for i in range(64):
+                # Перебираем 64 слота игроков по правильной двухуровневой схеме CS2
+                for i in range(1, 64):
                     try:
-                        list_entry = pm.read_longlong(entity_list + (i * 0x20))
+                        # Расчет индексов разветвления таблицы сущностей Valve
+                        chunk_idx = (i & 0x7FFF) >> 9
+                        inside_idx = i & 0x1FF
+
+                        list_entry = pm.read_longlong(entity_list + 0x8 * chunk_idx + 0x10)
                         if not list_entry or list_entry == 0:
                             continue
 
-                        player_controller = pm.read_longlong(list_entry + 0x0)
+                        player_controller = pm.read_longlong(list_entry + 0x78 * inside_idx)
                         if not player_controller or player_controller == 0:
                             continue
 
@@ -160,48 +183,63 @@ def main():
                         if not pawn_handle or pawn_handle == 0:
                             continue
 
-                        list_entry_pawn = pm.read_longlong(entity_list + (0x8 * ((pawn_handle & 0x7FFF) >> 9) + 0x10))
+                        # Ищем физический объект (Pawn) по его хэндлу
+                        pawn_chunk_idx = (pawn_handle & 0x7FFF) >> 9
+                        pawn_inside_idx = pawn_handle & 0x1FF
+
+                        list_entry_pawn = pm.read_longlong(entity_list + 0x8 * pawn_chunk_idx + 0x10)
                         if not list_entry_pawn or list_entry_pawn == 0:
                             continue
 
-                        pawn_ptr = pm.read_longlong(list_entry_pawn + (0x78 * (pawn_handle & 0x1FF)))
-                        if not pawn_ptr or pawn_ptr == 0:
+                        pawn_ptr = pm.read_longlong(list_entry_pawn + 0x78 * pawn_inside_idx)
+                        if not pawn_ptr or pawn_ptr == 0 or pawn_ptr == local_player_pawn:
                             continue
 
+                        # Валидация здоровья игрока
                         health = pm.read_int(pawn_ptr + conf["m_iHealth"])
                         if health <= 0 or health > 100:
                             continue
 
+                        # Считываем команду игрока
+                        team = pm.read_int(pawn_ptr + conf["m_iTeamNum"])
+
+                        # Считываем 3D координаты ног
                         pos_x = pm.read_float(pawn_ptr + conf["m_vOldOrigin"])
                         pos_y = pm.read_float(pawn_ptr + conf["m_vOldOrigin"] + 4)
                         pos_z = pm.read_float(pawn_ptr + conf["m_vOldOrigin"] + 8)
 
+                        # Переводим координаты на экран
                         screen_pos = world_to_screen([pos_x, pos_y, pos_z], view_matrix)
                         
                         if screen_pos:
                             sc_x = screen_pos[0] * (screen_w / 2)
                             sc_y = screen_pos[1] * (screen_h / 2)
                             
+                            # Получаем верхнюю точку (голову) для вычисления высоты бокса
                             head_pos = world_to_screen([pos_x, pos_y, pos_z + 72.0], view_matrix)
                             if head_pos:
                                 h_y = head_pos[1] * (screen_h / 2)
                                 box_height = max(5.0, sc_y - h_y)
-                                box_width = box_height / 2
+                                box_width = box_height / 1.8
                                 
-                                # Отрисовка бокса
+                                # Разделение цветов: Враги — Красные, Союзники — Синие
+                                if team == local_team:
+                                    color = imgui.get_color_u32_rgba(0.2, 0.5, 1.0, 1.0) # Синий
+                                else:
+                                    color = imgui.get_color_u32_rgba(1.0, 0.2, 0.2, 1.0) # Красный
+                                
+                                # Рисуем рамку вокруг игрока
                                 draw_list.add_rect(
                                     sc_x - (box_width / 2), h_y,
                                     sc_x + (box_width / 2), sc_y,
-                                    imgui.get_color_u32_rgba(0, 1, 0, 1),
-                                    thickness=2.0
+                                    color,
+                                    thickness=1.5
                                 )
-                                # Отрисовка здоровья
-                                imgui.set_cursor_position((sc_x - 10, h_y - 15))
-                                imgui.text_colored(f"{health} HP", 0, 1, 0, 1)
+                                # Отрисовываем текст здоровья
+                                draw_list.add_text(sc_x - (box_width / 2), h_y - 15, color, f"{health} HP")
 
                     except pymem.exception.MemoryReadError:
                         continue
-
         except pymem.exception.MemoryReadError:
             pass
         except Exception:
