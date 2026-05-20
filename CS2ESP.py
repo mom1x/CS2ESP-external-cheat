@@ -8,6 +8,8 @@ import glfw
 import OpenGL.GL as gl
 import imgui
 from imgui.integrations.glfw import GlfwRenderer
+import ctypes
+import struct
 
 # Системные библиотеки Windows
 import win32api
@@ -15,12 +17,10 @@ import win32gui
 import win32con
 
 # ==========================================
-# 1. БУЛЛЕТПРУФ ЗАГРУЗКА ОФФСЕТОВ
+# 1. ЗАГРУЗКА ОФФСЕТОВ ИЗ ОТДЕЛЬНОЙ ПАПКИ
 # ==========================================
 def load_offsets():
-    print("[INFO] Загрузка встроенных оффсетов из папки offsets...")
-    
-    # Резервный хардкод на случай критического сбоя файловой системы
+    # Хардкод-кэш на случай тотального сбоя файлов
     offsets_dict = {
         "dwEntityList": 0x18C2DB8, 
         "dwViewMatrix": 0x19242A0, 
@@ -31,33 +31,33 @@ def load_offsets():
         "m_iTeamNum": 0x3BF
     }
 
-    try:
-        if getattr(sys, 'frozen', False):
-            base_path = sys._MEIPASS
-        else:
-            base_path = os.path.dirname(os.path.abspath(__file__))
+    # Строго определяем путь к папке, где лежит сам запущенный .exe или .py файл
+    if getattr(sys, 'frozen', False):
+        root_dir = os.path.dirname(sys.executable)
+    else:
+        root_dir = os.path.dirname(os.path.abspath(__file__))
 
-        offsets_path = os.path.join(base_path, "offsets", "offsets.json")
-        client_dll_path = os.path.join(base_path, "offsets", "client_dll.json")
+    offsets_path = os.path.join(root_dir, "offsets", "offsets.json")
+    client_dll_path = os.path.join(root_dir, "offsets", "client_dll.json")
 
-        if os.path.exists(offsets_path) and os.path.exists(client_dll_path):
+    print(f"[INFO] Поиск папки с оффсетами в: {os.path.join(root_dir, 'offsets')}")
+
+    if os.path.exists(offsets_path) and os.path.exists(client_dll_path):
+        try:
             with open(offsets_path, "r") as f:
                 raw_offsets = json.load(f)["client.dll"]
             with open(client_dll_path, "r") as f:
                 raw_classes = json.load(f)["client.dll"]["classes"]
 
-            # Глобальные смещения (обычно всегда прямые числа)
             offsets_dict["dwEntityList"] = raw_offsets.get("dwEntityList", offsets_dict["dwEntityList"])
             offsets_dict["dwViewMatrix"] = raw_offsets.get("dwViewMatrix", offsets_dict["dwViewMatrix"])
             offsets_dict["dwLocalPlayerPawn"] = raw_offsets.get("dwLocalPlayerPawn", offsets_dict["dwLocalPlayerPawn"])
 
-            # Внутренняя функция для безопасного извлечения смещения из любого формата JSON
             def parse_field(field_data):
                 if isinstance(field_data, dict):
                     return field_data.get("value", field_data.get("offset", 0))
                 return field_data
 
-            # Сканируем классы на наличие нужных нам переменных
             for class_name, class_body in raw_classes.items():
                 fields = class_body.get("fields", {})
                 if "m_iHealth" in fields:
@@ -69,9 +69,11 @@ def load_offsets():
                 if "m_iTeamNum" in fields:
                     offsets_dict["m_iTeamNum"] = parse_field(fields["m_iTeamNum"])
             
-            print("[SUCCESS] Оффсеты успешно сопоставлены из актуального JSON!")
-    except Exception as e:
-        print(f"[WARN] Не удалось разобрать JSON (работает резервный кэш): {e}")
+            print("[SUCCESS] Оффсеты успешно сопоставлены из внешней папки!")
+        except Exception as e:
+            print(f"[WARN] Ошибка парсинга внешних JSON: {e}. Используются базовые адреса.")
+    else:
+        print("[WARN] Внешняя папка 'offsets' не найдена рядом с файлом! Используются базовые адреса.")
         
     return offsets_dict
 
@@ -102,7 +104,6 @@ def init_overlay():
     glfw.window_hint(glfw.TRANSPARENT_FRAMEBUFFER, glfw.TRUE)
     glfw.window_hint(glfw.MOUSE_PASSTHROUGH, glfw.TRUE)
 
-    # Запрашиваем разрешение экрана напрямую у Windows
     screen_w = int(win32api.GetSystemMetrics(0))
     screen_h = int(win32api.GetSystemMetrics(1))
     
@@ -117,7 +118,6 @@ def init_overlay():
     glfw.make_context_current(window)
     glfw.swap_interval(1)
     
-    # Применяем прозрачность и игнорирование кликов на уровне Windows Styles
     hwnd = glfw.get_win32_window(window)
     win32gui.SetWindowLong(hwnd, win32con.GWL_EXSTYLE, 
                            win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE) | win32con.WS_EX_LAYERED | win32con.WS_EX_TRANSPARENT)
@@ -131,18 +131,38 @@ def init_overlay():
 # ==========================================
 def main():
     conf = load_offsets()
-    print("[INFO] Ожидание запуска CS2...")
+    print("[INFO] Ожидание запуска CS2 (Безопасный режим без прав администратора)...")
     
-    pm = None
+    pm = pymem.Pymem()
     client_dll = None
     
+    # Обход UAC: Получаем дескриптор процесса через WinAPI с минимальными правами доступа
     while True:
         try:
-            pm = pymem.Pymem("cs2.exe")
-            client_dll = pymem.process.module_from_name(pm.process_handle, "client.dll").lpBaseOfDll
-            print("[SUCCESS] Успешное подключение к памяти CS2!")
-            break
-        except pymem.exception.ProcessNotFound:
+            pid = None
+            for proc in pymem.process.list_processes():
+                try:
+                    exe_name = proc.szExeFile.decode('utf-8', errors='ignore').lower()
+                except Exception:
+                    exe_name = str(proc.szExeFile).lower()
+                
+                if "cs2.exe" in exe_name:
+                    pid = proc.th32ProcessID
+                    break
+            
+            if pid:
+                PROCESS_VM_READ = 0x0010
+                PROCESS_QUERY_INFORMATION = 0x0400
+                
+                # Запрос дескриптора у Windows без триггера Администратора
+                handle = ctypes.windll.kernel32.OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, False, pid)
+                
+                if handle:
+                    pm.process_id = pid
+                    pm.process_handle = handle
+                    client_dll = pymem.process.module_from_name(pm.process_handle, "client.dll").lpBaseOfDll
+                    print("[SUCCESS] Подключение к памяти без прав Администратора выполнено успешно!")
+                    break
             time.sleep(1)
         except Exception:
             time.sleep(1)
@@ -163,11 +183,12 @@ def main():
         draw_list = imgui.get_window_draw_list()
 
         try:
-            # Считываем 16 значений матрицы камеры
-            view_matrix = [pm.read_float(client_dll + conf["dwViewMatrix"] + (m_idx * 4)) for m_idx in range(16)]
+            # Читаем всю матрицу за 1 системный запрос (64 байта вместо 16 вызовов по 4 байта)
+            matrix_bytes = pm.read_bytes(client_dll + conf["dwViewMatrix"], 64)
+            view_matrix = list(struct.unpack('16f', matrix_bytes))
+            
             entity_list = pm.read_longlong(client_dll + conf["dwEntityList"])
             
-            # Безопасное определение нашей команды
             local_team = -1
             try:
                 local_player_pawn = pm.read_longlong(client_dll + conf["dwLocalPlayerPawn"])
@@ -177,7 +198,6 @@ def main():
                 local_player_pawn = 0
 
             if entity_list and entity_list != 0:
-                # Проходим по индексам сущностей (игроки и боты занимают первые 64 слота)
                 for i in range(1, 64):
                     try:
                         chunk_idx = (i & 0x7FFF) >> 9
@@ -195,7 +215,6 @@ def main():
                         if not pawn_handle or pawn_handle == 0:
                             continue
 
-                        # Переходим к физическому объекту игрока (Pawn)
                         pawn_chunk_idx = (pawn_handle & 0x7FFF) >> 9
                         pawn_inside_idx = pawn_handle & 0x1FF
 
@@ -213,7 +232,6 @@ def main():
 
                         team = pm.read_int(pawn_ptr + conf["m_iTeamNum"])
 
-                        # Считываем позицию ног (X, Y, Z)
                         pos_x = pm.read_float(pawn_ptr + conf["m_vOldOrigin"])
                         pos_y = pm.read_float(pawn_ptr + conf["m_vOldOrigin"] + 4)
                         pos_z = pm.read_float(pawn_ptr + conf["m_vOldOrigin"] + 8)
@@ -224,20 +242,18 @@ def main():
                             sc_x = screen_pos[0] * (screen_w / 2)
                             sc_y = screen_pos[1] * (screen_h / 2)
                             
-                            # Находим позицию головы (рост модели игрока в CS2 равен ~72 единицам)
                             head_pos = world_to_screen([pos_x, pos_y, pos_z + 72.0], view_matrix)
                             if head_pos:
                                 h_y = head_pos[1] * (screen_h / 2)
                                 box_height = max(5.0, sc_y - h_y)
                                 box_width = box_height / 1.8
                                 
-                                # Распределение цветов
                                 if team == local_team and local_team != -1:
-                                    color = imgui.get_color_u32_rgba(0.2, 0.6, 1.0, 1.0) # Союзники - Синие
+                                    color = imgui.get_color_u32_rgba(0.2, 0.6, 1.0, 1.0) # Синий для союзников
                                 else:
-                                    color = imgui.get_color_u32_rgba(1.0, 0.2, 0.2, 1.0) # Враги/Боты - Красные
+                                    color = imgui.get_color_u32_rgba(1.0, 0.2, 0.2, 1.0) # Красный для ботов/врагов
                                 
-                                # Отрисовка прямоугольника (Строго позиционные аргументы Cython)
+                                # Отрисовка геометрии (Позиционная передача аргументов для Cython)
                                 draw_list.add_rect(
                                     sc_x - (box_width / 2), 
                                     h_y, 
@@ -249,7 +265,6 @@ def main():
                                     1.5
                                 )
                                 
-                                # Отрисовка текста здоровья
                                 draw_list.add_text(sc_x - (box_width / 2), h_y - 15, color, f"{health} HP")
 
                     except pymem.exception.MemoryReadError:
