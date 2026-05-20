@@ -1,7 +1,7 @@
 name: Build CS2ESP to EXE
 
 on:
-  workflow_dispatch:  # Ручной запуск (или можно push)
+  workflow_dispatch:
 
 jobs:
   build:
@@ -18,12 +18,16 @@ jobs:
 
     - name: Update dumper links to the latest
       run: |
-        # Обновляем ссылки на самые свежие дампы (проверено, рабочие на сегодня)
         $offsetsUrl = 'https://raw.githubusercontent.com/a2x/cs2-dumper/main/output/offsets.json'
         $clientDllUrl = 'https://raw.githubusercontent.com/a2x/cs2-dumper/main/output/client_dll.json'
         (Get-Content CS2ESP.py) -replace "https://raw\.githubusercontent\.com/a2x/cs2-dumper/main/output/offsets\.json", $offsetsUrl | Set-Content CS2ESP.py
         (Get-Content CS2ESP.py) -replace "https://raw\.githubusercontent\.com/a2x/cs2-dumper/main/output/client_dll\.json", $clientDllUrl | Set-Content CS2ESP.py
-        Write-Host "Links updated successfully to the latest dumper."
+        Write-Host "Links updated successfully."
+
+    - name: Fix requirements.txt (replace win32 with pywin32)
+      run: |
+        (Get-Content requirements.txt) -replace '^win32$', 'pywin32' | Set-Content requirements.txt
+        Write-Host "Fixed requirements.txt"
 
     - name: Install dependencies
       run: |
