@@ -16,7 +16,7 @@ except:
     except:
         pass
 
-# Получаем точное разрешение экрана после фикса DPI
+# Получаем точное разрешение экрана
 WINDOW_WIDTH = win32api.GetSystemMetrics(0)
 WINDOW_HEIGHT = win32api.GetSystemMetrics(1)
 
@@ -69,10 +69,11 @@ def load_local_offsets():
         config_status = f"Parser Error: {str(e)}"
         offsets_loaded = False
 
+# Исправленная функция World To Screen по rows (как у swedz в видео)
 def w2s(mtx, posx, posy, posz, width, height):
-    clipX = posx * mtx[0] + posy * mtx[4] + posz * mtx[8] + mtx[12]
-    clipY = posx * mtx[1] + posy * mtx[5] + posz * mtx[9] + mtx[13]
-    clipW = posx * mtx[3] + posy * mtx[7] + posz * mtx[11] + mtx[15]
+    clipX = posx * mtx[0] + posy * mtx[1] + posz * mtx[2] + mtx[3]
+    clipY = posx * mtx[4] + posy * mtx[5] + posz * mtx[6] + mtx[7]
+    clipW = posx * mtx[12] + posy * mtx[13] + posz * mtx[14] + mtx[15]
 
     if clipW > 0.001:
         x = (width / 2) + (clipX / clipW) * (width / 2)
@@ -106,60 +107,73 @@ def esp(draw_list):
 
     loop_status = "Processing Entities..."
 
+    # Первые 64 записи зарезервированы под контроллеры игроков (и ботов)
     for i in range(64):
         try:
+            # 0x10 = 16 (смещение первого листа)
             list_entry = pm.read_longlong(entity + (0x8 * (i >> 9) + 16))
             if not list_entry: continue
 
-            entity_controller = pm.read_longlong(list_entry + 112 * (i & 0x1FF))
+            # Множитель ИСПРАВЛЕН на 120 (0x78 в хексе)
+            entity_controller = pm.read_longlong(list_entry + 120 * (i & 0x1FF))
             if not entity_controller: continue
 
+            # Фикс счётчика: Увеличиваем checked СРАЗУ, как нашли живой контроллер слота игрока!
+            # Теперь число стабильно держится (например, 9), даже если игрок мёртв или выбирает команду.
+            stats["checked"] += 1
+
+            # Достаем хэндл Pawn (персонажа на карте)
             entity_controller_pawn = pm.read_int(entity_controller + m_hPlayerPawn)
             if not entity_controller_pawn: continue
 
+            # Получаем вторую запись листа (уже для Pawn)
             list_entry2 = pm.read_longlong(entity + (0x8 * ((entity_controller_pawn & 0x7FFF) >> 9) + 16))
             if not list_entry2: continue
 
-            entity_pawn = pm.read_longlong(list_entry2 + 112 * (entity_controller_pawn & 0x1FF))
+            # Множитель ИСПРАВЛЕН на 120
+            entity_pawn = pm.read_longlong(list_entry2 + 120 * (entity_controller_pawn & 0x1FF))
             if not entity_pawn or entity_pawn == local_player: continue
 
-            stats["checked"] += 1
-
-            if pm.read_int(entity_pawn + m_lifeState) != 0: continue
+            # Самая надежная проверка: живой ли игрок через ХП
+            entity_hp = pm.read_int(entity_pawn + m_iHealth)
+            if entity_hp <= 0 or entity_hp > 100: continue
             stats["alive"] += 1
 
+            # Проверка на тимейта
             if pm.read_int(entity_pawn + m_iTeamNum) == local_team: continue
             stats["enemies"] += 1
 
-            # Кости
+            # Кости (Скелет персонажа)
             game_scene = pm.read_longlong(entity_pawn + m_pGameSceneNode)
             bone_matrix = pm.read_longlong(game_scene + m_modelState + 0x80)
 
+            # Берем координаты головы (кость №6)
             headX = pm.read_float(bone_matrix + 6 * 0x20)
             headY = pm.read_float(bone_matrix + 6 * 0x20 + 0x4)
-            headZ = pm.read_float(bone_matrix + 6 * 0x20 + 0x8) + 6
+            headZ = pm.read_float(bone_matrix + 6 * 0x20 + 0x8) + 6 # Смещение чуть выше головы
             head_pos = w2s(view_matrix, headX, headY, headZ, WINDOW_WIDTH, WINDOW_HEIGHT)
 
+            # Берем координаты ног (кость №28)
             legZ = pm.read_float(bone_matrix + 28 * 0x20 + 0x8)
             leg_pos = w2s(view_matrix, headX, headY, legZ, WINDOW_WIDTH, WINDOW_HEIGHT)
 
+            # Если точки за экраном — пропускаем отрисовку
             if head_pos[0] == -999 or leg_pos[0] == -999: continue
             stats["on_screen"] += 1
 
-            # Отрегулированные пропорции бокса (3.5 делает его аккуратнее)
-            color = imgui.get_color_u32_rgba(1, 0.2, 0.2, 1) 
+            # Считаем размеры рамки ESP
+            color = imgui.get_color_u32_rgba(1, 0.2, 0.2, 1) # Яркий Красный
             delta = abs(head_pos[1] - leg_pos[1])
             leftX = head_pos[0] - delta // 3.5
             rightX = head_pos[0] + delta // 3.5
 
-            # Рисуем бокс
+            # Отрисовка аккуратного бокса
             draw_list.add_line(leftX,  leg_pos[1],  rightX, leg_pos[1],  color, 1.5)
             draw_list.add_line(leftX,  leg_pos[1],  leftX,  head_pos[1], color, 1.5)
             draw_list.add_line(rightX, leg_pos[1],  rightX, head_pos[1], color, 1.5)
             draw_list.add_line(leftX,  head_pos[1], rightX, head_pos[1], color, 1.5)
 
-            # Текст здоровья чуть ближе к боксу
-            entity_hp = pm.read_int(entity_pawn + m_iHealth)
+            # Рисуем текст здоровья рядом с боксом
             draw_list.add_text(leftX - 18, head_pos[1] - 5, color, f"{entity_hp}")
         except:
             continue
@@ -234,7 +248,7 @@ def main():
             
         imgui.end()
 
-        # HUD панели управления
+        # HUD Панель управления (VibeCoder Master HUD)
         imgui.set_next_window_position(10, 10)
         imgui.set_next_window_size(330, 160)
         imgui.begin("VibeCoder Master HUD", flags=imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_COLLAPSE)
@@ -253,7 +267,7 @@ def main():
         impl.render(imgui.get_draw_data())
         glfw.swap_buffers(window)
         
-        # Разгружаем процессор (ограничиваем FPS оверлея ~140 кадров, чтобы не было лагов)
+        # Разгрузка CPU (FPS ~140 кадров)
         time.sleep(0.007)
 
     impl.shutdown()
