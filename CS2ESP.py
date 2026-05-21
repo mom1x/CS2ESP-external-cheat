@@ -7,7 +7,7 @@ from imgui.integrations.glfw import GlfwRenderer
 import glfw
 import OpenGL.GL as gl
 
-# Включаем DPI Awareness, чтобы сетка координат не съезжала
+# Настройка DPI, чтобы сетка координат не смещалась
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(2)
 except:
@@ -16,14 +16,13 @@ except:
     except:
         pass
 
-# Разрешение экрана
 WINDOW_WIDTH = win32api.GetSystemMetrics(0)
 WINDOW_HEIGHT = win32api.GetSystemMetrics(1)
 
-# Смещения памяти
-dwEntityList, dwLocalPlayerPawn, dwViewMatrix = None, None, None
+# Базовые смещения
+dwEntityList, dwLocalPlayerPawn, dwViewMatrix, dwLocalPlayerController = None, None, None, None
 m_iTeamNum, m_lifeState, m_pGameSceneNode = None, None, None
-m_modelState, m_hPlayerPawn, m_iHealth, m_vecOrigin = None, None, None, None 
+m_modelState, m_hPlayerPawn, m_iHealth, m_vecOrigin, m_entitySpottedState = None, None, None, None, None
 
 pm = None
 client = None
@@ -31,18 +30,18 @@ game_status = "Waiting for cs2.exe..."
 config_status = "Checking local offsets..."
 loop_status = "Initializing..."
 offsets_loaded = False
-stats = {"checked": 0, "alive": 0, "enemies": 0, "on_screen": 0}
+stats = {"checked": 0, "alive": 0, "enemies": 0, "visible": 0}
 
 def load_local_offsets():
-    global dwEntityList, dwLocalPlayerPawn, dwViewMatrix
-    global m_iTeamNum, m_lifeState, m_pGameSceneNode, m_modelState, m_hPlayerPawn, m_iHealth, m_vecOrigin
+    global dwEntityList, dwLocalPlayerPawn, dwViewMatrix, dwLocalPlayerController
+    global m_iTeamNum, m_lifeState, m_pGameSceneNode, m_modelState, m_hPlayerPawn, m_iHealth, m_vecOrigin, m_entitySpottedState
     global config_status, offsets_loaded
 
     offsets_path = os.path.join("offsets", "offsets.json")
     client_dll_path = os.path.join("offsets", "client_dll.json")
 
     if not os.path.exists(offsets_path) or not os.path.exists(client_dll_path):
-        config_status = "Error: Files not found in /offsets/"
+        config_status = "Error: JSON files not found!"
         offsets_loaded = False
         return
 
@@ -52,10 +51,15 @@ def load_local_offsets():
         with open(client_dll_path, "r", encoding="utf-8") as f:
             client_dll_data = json.load(f)
 
+        # Системные смещения
         dwEntityList = offsets_data['client.dll']['dwEntityList']
         dwLocalPlayerPawn = offsets_data['client.dll']['dwLocalPlayerPawn']
         dwViewMatrix = offsets_data['client.dll']['dwViewMatrix']
+        
+        # Берем контроллер для проверки видимости (если есть в дампе)
+        dwLocalPlayerController = offsets_data['client.dll'].get('dwLocalPlayerController', None)
 
+        # Смещения классов
         m_iTeamNum = client_dll_data['client.dll']['classes']['C_BaseEntity']['fields']['m_iTeamNum']
         m_lifeState = client_dll_data['client.dll']['classes']['C_BaseEntity']['fields']['m_lifeState']
         m_pGameSceneNode = client_dll_data['client.dll']['classes']['C_BaseEntity']['fields']['m_pGameSceneNode']
@@ -63,8 +67,11 @@ def load_local_offsets():
         m_hPlayerPawn = client_dll_data['client.dll']['classes']['CCSPlayerController']['fields']['m_hPlayerPawn']
         m_iHealth = client_dll_data['client.dll']['classes']['C_BaseEntity']['fields']['m_iHealth']
         m_vecOrigin = client_dll_data['client.dll']['classes']['CGameSceneNode']['fields']['m_vecOrigin']
+        
+        # Смещение маски видимости радара
+        m_entitySpottedState = client_dll_data['client.dll']['classes'].get('C_CSPlayerPawn', {}).get('fields', {}).get('m_entitySpottedState', None)
 
-        config_status = "Offsets loaded successfully!"
+        config_status = "Offsets applied successfully!"
         offsets_loaded = True
     except Exception as e:
         config_status = f"Parser Error: {str(e)}"
@@ -84,110 +91,124 @@ def w2s(mtx, posx, posy, posz, width, height):
 def esp(draw_list):
     global stats, pm, client, offsets_loaded, loop_status
     if not pm or not client or not offsets_loaded: 
-        loop_status = "Sleep (No Connection)"
+        loop_status = "Sleep (No Game Context)"
         return
 
-    stats = {"checked": 0, "alive": 0, "enemies": 0, "on_screen": 0}
+    stats = {"checked": 0, "alive": 0, "enemies": 0, "visible": 0}
 
     try:
         view_matrix = [pm.read_float(client + dwViewMatrix + i * 4) for i in range(16)]
         local_player = pm.read_longlong(client + dwLocalPlayerPawn)
-        if not local_player: 
-            loop_status = "In Main Menu / Loading Match"
+        if not local_player:
+            loop_status = "Main Menu / Loading"
             return
         local_team = pm.read_int(local_player + m_iTeamNum)
+        
+        # Получаем адрес EntityList как указатель
+        entity_list = pm.read_longlong(client + dwEntityList)
+        if not entity_list: return
     except:
-        loop_status = "Err: Critical memory read failed"
         return
 
-    # МЕТОД SWEDZ: Берём чистый адрес структуры, БЕЗ преждевременного чтения памяти
-    entity_list_base = client + dwEntityList
-    loop_status = "Processing Entities..."
-
-    # Проходим по контроллерам игроков (слоты 1-64)
-    for i in range(1, 65):
+    # Логика определения индекса локального игрока для проверки SpottedMask
+    local_idx = -1
+    if dwLocalPlayerController and entity_list:
         try:
-            # Вычисляем правильный list_entry для контроллера
-            list_entry = pm.read_longlong(entity_list_base + (8 * (i >> 9) + 16))
+            local_controller = pm.read_longlong(client + dwLocalPlayerController)
+            for idx in range(0, 64):
+                le = pm.read_longlong(entity_list + (((8 * (idx & 0x7FFF)) >> 9) + 16))
+                if le:
+                    pc = pm.read_longlong(le + 112 * (idx & 0x1FF))
+                    if pc == local_controller:
+                        local_idx = idx
+                        break
+        except:
+            pass
+
+    loop_status = "Active Scanning..."
+
+    # Пробегаем по циклу энтити точно по твоему шаблону (0 - 64)
+    for i in range(0, 64):
+        try:
+            # Математика смещений один в один как в твоем GlowESP
+            list_entry_offset = ((8 * (i & 0x7FFF)) >> 9) + 16
+            list_entry = pm.read_longlong(entity_list + list_entry_offset)
             if not list_entry: continue
 
-            # Находим сам контроллер игрока
-            entity_controller = pm.read_longlong(list_entry + 120 * (i & 0x1FF))
-            if not entity_controller: continue
+            # Шаг равен 112 байтам!
+            player_controller = pm.read_longlong(list_entry + 112 * (i & 0x1FF))
+            if not player_controller: continue
 
-            # Достаем хэндл его Pawn тела
-            entity_controller_pawn = pm.read_int(entity_controller + m_hPlayerPawn)
-            if not entity_controller_pawn: continue
+            pawn_handle = pm.read_uint(player_controller + m_hPlayerPawn)
+            if not pawn_handle: continue
 
-            # Теперь этот счётчик инкрементируется честно, находя реальные контроллеры!
             stats["checked"] += 1
 
-            # Битовая маска Swedz для расшифровки хэндла Pawn
-            pawn_idx = entity_controller_pawn & 0x7FFF
-            
-            # Направляемся во второй list_entry, где лежат сами Pawn (тела)
-            list_entry2 = pm.read_longlong(entity_list_base + (8 * (pawn_idx >> 9) + 16))
+            # Переход ко второму листу для получения Pawn по хэндлу
+            list_entry2_offset = ((8 * (pawn_handle & 0x7FFF)) >> 9) + 16
+            list_entry2 = pm.read_longlong(entity_list + list_entry2_offset)
             if not list_entry2: continue
 
-            # Получаем чистый указатель на Pawn в памяти игрового движка
-            entity_pawn = pm.read_longlong(list_entry2 + 120 * (pawn_idx & 0x1FF))
+            # Находим саму сущность (тело игрока)
+            entity_pawn = pm.read_longlong(list_entry2 + 112 * (pawn_handle & 0x1FF))
             if not entity_pawn or entity_pawn == local_player: continue
 
-            # Проверка здоровья
-            entity_hp = pm.read_int(entity_pawn + m_iHealth)
-            if entity_hp <= 0 or entity_hp > 100: continue
+            # Здоровье
+            health = pm.read_int(entity_pawn + m_iHealth)
+            if health <= 0 or health > 100: continue
             stats["alive"] += 1
 
-            # Проверка команды (отсеиваем союзников)
-            if pm.read_int(entity_pawn + m_iTeamNum) == local_team: continue
+            # Команда
+            team = pm.read_int(entity_pawn + m_iTeamNum)
+            if team == local_team: continue
             stats["enemies"] += 1
 
+            # Позиция в мире
             game_scene = pm.read_longlong(entity_pawn + m_pGameSceneNode)
             if not game_scene: continue
 
-            # Координаты ног (Origin)
             feetX = pm.read_float(game_scene + m_vecOrigin)
             feetY = pm.read_float(game_scene + m_vecOrigin + 0x4)
             feetZ = pm.read_float(game_scene + m_vecOrigin + 0x8)
-            
-            headX, headY, headZ = feetX, feetY, feetZ + 68.0
-            legZ = feetZ
 
-            # Коррекция положения головы по костям (скелетная модель)
-            try:
-                bone_matrix = pm.read_longlong(game_scene + m_modelState + 0x80)
-                if bone_matrix:
-                    b_headX = pm.read_float(bone_matrix + 6 * 0x20)
-                    b_headY = pm.read_float(bone_matrix + 6 * 0x20 + 0x4)
-                    b_headZ = pm.read_float(bone_matrix + 6 * 0x20 + 0x8)
-                    b_legZ = pm.read_float(bone_matrix + 28 * 0x20 + 0x8)
-                    
-                    if b_headX != 0.0 and b_headY != 0.0:
-                        headX, headY, headZ = b_headX, b_headY, b_headZ + 6.0
-                        legZ = b_legZ
-            except:
-                pass 
+            # Проверка видимости через m_bSpottedByMask из твоего третьего пункта
+            is_spotted = False
+            if local_idx != -1 and m_entitySpottedState:
+                try:
+                    player_slot = local_idx - 1
+                    spotted_base = entity_pawn + m_entitySpottedState
+                    part = player_slot // 32
+                    bit = player_slot % 32
+                    mask = pm.read_uint(spotted_base + 0xC + part * 4)
+                    is_spotted = (mask & (1 << bit)) != 0
+                except:
+                    pass
 
-            # Перевод 3D координат в 2D пиксели экрана
-            head_pos = w2s(view_matrix, headX, headY, headZ, WINDOW_WIDTH, WINDOW_HEIGHT)
-            leg_pos = w2s(view_matrix, headX, headY, legZ, WINDOW_WIDTH, WINDOW_HEIGHT)
+            if is_spotted:
+                stats["visible"] += 1
+                # Если виден — сочный зелёный бокс
+                box_color = imgui.get_color_u32_rgba(0.2, 1.0, 0.2, 1.0)
+            else:
+                # Скрыт — классический красный
+                box_color = imgui.get_color_u32_rgba(1.0, 0.2, 0.2, 1.0)
+
+            # Перевод координат в 2D пространство экрана
+            head_pos = w2s(view_matrix, feetX, feetY, feetZ + 70.0, WINDOW_WIDTH, WINDOW_HEIGHT)
+            leg_pos = w2s(view_matrix, feetX, feetY, feetZ, WINDOW_WIDTH, WINDOW_HEIGHT)
 
             if head_pos[0] == -999 or leg_pos[0] == -999: continue
-            stats["on_screen"] += 1
 
-            # Отрисовка бокса вокруг врага
-            color = imgui.get_color_u32_rgba(1.0, 0.1, 0.1, 1.0) # Насыщенный красный
-            delta = abs(head_pos[1] - leg_pos[1])
-            leftX = head_pos[0] - delta // 3.5
-            rightX = head_pos[0] + delta // 3.5
+            # Отрисовка динамической рамки вокруг врага
+            height_diff = abs(head_pos[1] - leg_pos[1])
+            width_diff = height_diff / 2.0
+            
+            left_x = head_pos[0] - (width_diff / 2.0)
+            right_x = head_pos[0] + (width_diff / 2.0)
 
-            draw_list.add_line(leftX,  leg_pos[1],  rightX, leg_pos[1],  color, 1.5)
-            draw_list.add_line(leftX,  leg_pos[1],  leftX,  head_pos[1], color, 1.5)
-            draw_list.add_line(rightX, leg_pos[1],  rightX, head_pos[1], color, 1.5)
-            draw_list.add_line(leftX,  head_pos[1], rightX, head_pos[1], color, 1.5)
-
-            # Текст здоровья рядом с боксом
-            draw_list.add_text(leftX - 20, head_pos[1] - 5, color, f"HP: {entity_hp}")
+            draw_list.add_rect(left_x, head_pos[1], right_x, leg_pos[1], box_color, rounding=2.0, thickness=1.5)
+            
+            # Текст под боксом
+            draw_list.add_text(left_x, leg_pos[1] + 2, box_color, f"HP: {health}")
         except:
             continue
 
@@ -197,6 +218,7 @@ def try_connect_game():
         process = pymem.process.process_from_name("cs2.exe")
         if process:
             pid = process.th32ProcessID
+            # Работаем строго в USER MODE без прав Администратора
             PROCESS_VM_READ = 0x0010
             PROCESS_QUERY_INFORMATION = 0x0400
             handle = ctypes.windll.kernel32.OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, False, pid)
@@ -206,11 +228,11 @@ def try_connect_game():
                 pm.process_id = pid
                 pm.process_handle = handle
                 client = pymem.process.module_from_name(pm.process_handle, "client.dll").lpBaseOfDll
-                game_status = "CS2 Connected!"
+                game_status = "Connected to CS2 Instance"
                 return True
     except:
         pass
-    game_status = "Waiting for cs2.exe..."
+    game_status = "Searching for cs2.exe..."
     return False
 
 def main():
@@ -220,7 +242,7 @@ def main():
     glfw.window_hint(glfw.FLOATING, glfw.TRUE)
     glfw.window_hint(glfw.RESIZABLE, glfw.FALSE)
     
-    window = glfw.create_window(WINDOW_WIDTH, WINDOW_HEIGHT, "overlay", None, None)
+    window = glfw.create_window(WINDOW_WIDTH, WINDOW_HEIGHT, "VibeOverlay", None, None)
     if not window:
         glfw.terminate()
         return
@@ -247,13 +269,14 @@ def main():
         imgui.new_frame()
         
         current_time = time.time()
-        if not pm and current_time - last_check > 1.0:
+        if not pm and current_time - last_check > 1.5:
             last_check = current_time
             try_connect_game()
 
+        # Прозрачное окно для рендеринга боксов
         imgui.set_next_window_size(WINDOW_WIDTH, WINDOW_HEIGHT)
         imgui.set_next_window_position(0, 0)
-        imgui.begin("overlay", flags=imgui.WINDOW_NO_TITLE_BAR | imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_SCROLLBAR | imgui.WINDOW_NO_COLLAPSE | imgui.WINDOW_NO_BACKGROUND)
+        imgui.begin("Canvas", flags=imgui.WINDOW_NO_TITLE_BAR | imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_SCROLLBAR | imgui.WINDOW_NO_COLLAPSE | imgui.WINDOW_NO_BACKGROUND)
         
         draw_list = imgui.get_window_draw_list()
         if offsets_loaded and pm:
@@ -261,18 +284,18 @@ def main():
             
         imgui.end()
 
-        # GUI-панель (Без упоминаний админа/UAC)
-        imgui.set_next_window_position(10, 10)
-        imgui.set_next_window_size(330, 190)
-        imgui.begin("VibeCoder Non-Admin HUD", flags=imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_COLLAPSE)
-        imgui.text(f"Offsets: {config_status}")
-        imgui.text(f"Game Status: {game_status}")
-        imgui.text(f"Diagnostic: {loop_status}")
+        # Панель мониторинга на экране
+        imgui.set_next_window_position(15, 15)
+        imgui.set_next_window_size(320, 180)
+        imgui.begin("Vibe HUD Pro", flags=imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_COLLAPSE)
+        imgui.text(f"Config: {config_status}")
+        imgui.text(f"Engine: {game_status}")
+        imgui.text(f"Thread State: {loop_status}")
         imgui.separator()
-        imgui.text(f"Entities Checked: {stats['checked']}")
-        imgui.text(f"Alive Players: {stats['alive']}")
-        imgui.text(f"Enemies Found: {stats['enemies']}")
-        imgui.text(f"Rendered Boxes: {stats['on_screen']}")
+        imgui.text(f"Entities In Array: {stats['checked']}")
+        imgui.text(f"Valid Pawns: {stats['alive']}")
+        imgui.text(f"Enemies Parsed: {stats['enemies']}")
+        imgui.text(f"Spotted (Visible): {stats['visible']}")
         imgui.end()
 
         imgui.end_frame()
@@ -282,7 +305,7 @@ def main():
         impl.render(imgui.get_draw_data())
         glfw.swap_buffers(window)
         
-        time.sleep(0.007)
+        time.sleep(0.005)
 
     impl.shutdown()
     glfw.terminate()
