@@ -8,11 +8,10 @@ import glfw
 import OpenGL.GL as gl
 import requests
 
-# НАСТРОЙКА: Если твой монитор НЕ 1920x1080, поменяй эти цифры под свое разрешение экрана!
 WINDOW_WIDTH = 1920
 WINDOW_HEIGHT = 1080
 
-# Получение динамических смещений (дампер a2x)
+print("Loading offsets...")
 offsets = requests.get('https://raw.githubusercontent.com/a2x/cs2-dumper/main/output/offsets.json').json()
 client_dll = requests.get('https://raw.githubusercontent.com/a2x/cs2-dumper/main/output/client_dll.json').json()
 
@@ -27,7 +26,6 @@ m_modelState = client_dll['client.dll']['classes']['CSkeletonInstance']['fields'
 m_hPlayerPawn = client_dll['client.dll']['classes']['CCSPlayerController']['fields']['m_hPlayerPawn']
 m_iHealth = client_dll['client.dll']['classes']['C_BaseEntity']['fields']['m_iHealth']
 
-# Ожидаем запуска игры
 print("Waiting for cs2.exe...")
 while True:
     time.sleep(1)
@@ -38,120 +36,114 @@ while True:
     except:
         pass
 
-time.sleep(1)
-os.system("cls")
-print("CS2 Detected! Overlay is successfully attached.")
+print("CS2 Detected! Active Debug Mode.")
+
+# Переменные для вывода статистики в консоль
+last_debug_time = 0
+stats = {"checked": 0, "alive": 0, "enemies": 0, "on_screen": 0}
 
 def w2s(mtx, posx, posy, posz, width, height):
-    screenW = mtx[12]*posx + mtx[13]*posy + mtx[14]*posz + mtx[15]
-    if screenW > 0.001:
-        screenX = mtx[0]*posx + mtx[1]*posy + mtx[2]*posz + mtx[3]
-        screenY = mtx[4]*posx + mtx[5]*posy + mtx[6]*posz + mtx[7]
-        camX = width / 2
-        camY = height / 2
-        x = camX + (camX * screenX / screenW) // 1
-        y = camY - (camY * screenY / screenW) // 1
+    # Альтернативная (Column-Major) формула проекции для CS2, которая чаще всего исправляет пустой экран
+    clipX = posx * mtx[0] + posy * mtx[4] + posz * mtx[8] + mtx[12]
+    clipY = posx * mtx[1] + posy * mtx[5] + posz * mtx[9] + mtx[13]
+    clipW = posx * mtx[3] + posy * mtx[7] + posz * mtx[11] + mtx[15]
+
+    if clipW > 0.001:
+        x = (width / 2) + (clipX / clipW) * (width / 2)
+        y = (height / 2) - (clipY / clipW) * (height / 2)
         return [x, y]
     return [-999, -999]
 
 def esp(draw_list):
-    # Безопасное чтение матрицы и локального игрока
+    global last_debug_time, stats
+    current_time = time.time()
+    show_debug = False
+    
+    # Сбрасываем дебаг-счетчики раз в секунду
+    if current_time - last_debug_time > 1.0:
+        show_debug = True
+        last_debug_time = current_time
+        stats = {"checked": 0, "alive": 0, "enemies": 0, "on_screen": 0}
+
     try:
         view_matrix = [pm.read_float(client + dwViewMatrix + i * 4) for i in range(16)]
         local_player = pm.read_longlong(client + dwLocalPlayerPawn)
         if not local_player:
+            if show_debug: print("Debug: Local player pawn not found yet.")
             return
         local_team = pm.read_int(local_player + m_iTeamNum)
-    except:
+    except Exception as e:
+        if show_debug: print(f"Debug: Matrix/LocalPlayer read error: {e}")
         return
 
-    # Перебираем слоты сущностей (макс. 64 игрока)
+    # Проверяем 64 слота игроков/ботов
     for i in range(64):
         try:
             entity = pm.read_longlong(client + dwEntityList)
-            if not entity:
-                continue
+            if not entity: continue
 
-            # Находим адрес entity_controller
-            list_entry = pm.read_longlong(entity + ((8 * (i & 0x7FFF) >> 9) + 16))
-            if not list_entry:
-                continue
+            list_entry = pm.read_longlong(entity + (0x8 * (i >> 9) + 16))
+            if not list_entry: continue
 
             entity_controller = pm.read_longlong(list_entry + 120 * (i & 0x1FF))
-            if not entity_controller:
-                continue
+            if not entity_controller: continue
 
-            # Получаем pawn из контроллера
             entity_controller_pawn = pm.read_longlong(entity_controller + m_hPlayerPawn)
-            if not entity_controller_pawn:
-                continue
+            if not entity_controller_pawn: continue
 
-            # Достаем сам pawn игрока
             list_entry = pm.read_longlong(entity + (0x8 * ((entity_controller_pawn & 0x7FFF) >> 9) + 16))
-            if not list_entry:
-                continue
+            if not list_entry: continue
 
             entity_pawn = pm.read_longlong(list_entry + 120 * (entity_controller_pawn & 0x1FF))
-            if not entity_pawn or entity_pawn == local_player:
-                continue
+            if not entity_pawn or entity_pawn == local_player: continue
 
-            # ИСПРАВЛЕНО: В CS2 статус 0 означает, что игрок ЖИВ. Если не 0 — игрок мертв или возрождается, пропускаем его.
-            if pm.read_int(entity_pawn + m_lifeState) != 0:
-                continue
+            stats["checked"] += 1
 
-            # Пропускаем тиммейтов (рисуем только врагов)
-            if pm.read_int(entity_pawn + m_iTeamNum) == local_team:
-                continue
+            # Проверка здоровья/жизни
+            if pm.read_int(entity_pawn + m_lifeState) != 0: continue
+            stats["alive"] += 1
 
-            # Достаем указатель на матрицу костей
+            # Проверка команды
+            if pm.read_int(entity_pawn + m_iTeamNum) == local_team: continue
+            stats["enemies"] += 1
+
+            # Позиции костей
             game_scene = pm.read_longlong(entity_pawn + m_pGameSceneNode)
-            if not game_scene:
-                continue
-                
             bone_matrix = pm.read_longlong(game_scene + m_modelState + 0x80)
-            if not bone_matrix:
-                continue
 
-            # Координаты головы (кость 6)
             headX = pm.read_float(bone_matrix + 6 * 0x20)
             headY = pm.read_float(bone_matrix + 6 * 0x20 + 0x4)
-            headZ = pm.read_float(bone_matrix + 6 * 0x20 + 0x8) + 8
+            headZ = pm.read_float(bone_matrix + 6 * 0x20 + 0x8) + 6
             head_pos = w2s(view_matrix, headX, headY, headZ, WINDOW_WIDTH, WINDOW_HEIGHT)
 
-            # Координаты ног (кость 28)
             legZ = pm.read_float(bone_matrix + 28 * 0x20 + 0x8)
             leg_pos = w2s(view_matrix, headX, headY, legZ, WINDOW_WIDTH, WINDOW_HEIGHT)
 
-            # Если игрок находится вне зоны видимости (за спиной) — не рисуем
-            if head_pos[0] == -999 or leg_pos[0] == -999:
-                continue
+            if head_pos[0] == -999 or leg_pos[0] == -999: continue
+            stats["on_screen"] += 1
 
-            # Цвет бокса (Ярко-красный)
+            # Отрисовка
             color = imgui.get_color_u32_rgba(1, 0, 0, 1)
-
-            # Расчет размеров рамки вокруг игрока
             delta = abs(head_pos[1] - leg_pos[1])
             leftX = head_pos[0] - delta // 3
             rightX = head_pos[0] + delta // 3
 
-            # Отрисовка бокса
             draw_list.add_line(leftX,  leg_pos[1],  rightX, leg_pos[1],  color, 2.0)
             draw_list.add_line(leftX,  leg_pos[1],  leftX,  head_pos[1], color, 2.0)
             draw_list.add_line(rightX, leg_pos[1],  rightX, head_pos[1], color, 2.0)
             draw_list.add_line(leftX,  head_pos[1], rightX, head_pos[1], color, 2.0)
 
-            # Считывание здоровья и вывод текста
             entity_hp = pm.read_int(entity_pawn + m_iHealth)
             draw_list.add_text(leftX - 25, head_pos[1] - 5, color, f"HP: {entity_hp}")
 
-        except (pymem.exception.WinAPIError, pymem.exception.MemoryReadError, Exception):
-            # Перехват динамических изменений памяти (защита от краша при дисконнектах)
+        except:
             continue
 
-def main():
-    if not glfw.init():
-        return
+    if show_debug:
+        print(f"Stats -> Найдено сущностей: {stats['checked']} | Живых: {stats['alive']} | Врагов: {stats['enemies']} | На экране: {stats['on_screen']}", end="\r")
 
+def main():
+    if not glfw.init(): return
     glfw.window_hint(glfw.TRANSPARENT_FRAMEBUFFER, glfw.TRUE)
     glfw.window_hint(glfw.FLOATING, glfw.TRUE)
     glfw.window_hint(glfw.RESIZABLE, glfw.FALSE)
@@ -168,34 +160,25 @@ def main():
     
     ex_style = win32con.WS_EX_TRANSPARENT | win32con.WS_EX_LAYERED
     win32gui.SetWindowLong(hwnd, win32con.GWL_EXSTYLE, ex_style)
-    win32gui.SetWindowPos(hwnd, win32con.HWND_TOPMOST, -2, -2, 0, 0,
-                          win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE)
+    win32gui.SetWindowPos(hwnd, win32con.HWND_TOPMOST, -2, -2, 0, 0, win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE)
 
     glfw.make_context_current(window)
     imgui.create_context()
     impl = GlfwRenderer(window)
 
-    # Главный цикл рендеринга
     while not glfw.window_should_close(window):
         glfw.poll_events()
         impl.process_inputs()
         imgui.new_frame()
-
         imgui.set_next_window_size(WINDOW_WIDTH, WINDOW_HEIGHT)
         imgui.set_next_window_position(0, 0)
-        imgui.begin("overlay",
-                    flags=imgui.WINDOW_NO_TITLE_BAR |
-                          imgui.WINDOW_NO_RESIZE |
-                          imgui.WINDOW_NO_SCROLLBAR |
-                          imgui.WINDOW_NO_COLLAPSE |
-                          imgui.WINDOW_NO_BACKGROUND)
+        imgui.begin("overlay", flags=imgui.WINDOW_NO_TITLE_BAR | imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_SCROLLBAR | imgui.WINDOW_NO_COLLAPSE | imgui.WINDOW_NO_BACKGROUND)
 
         draw_list = imgui.get_window_draw_list()
         esp(draw_list)
 
         imgui.end()
         imgui.end_frame()
-
         gl.glClearColor(0, 0, 0, 0)
         gl.glClear(gl.GL_COLOR_BUFFER_BIT)
         imgui.render()
