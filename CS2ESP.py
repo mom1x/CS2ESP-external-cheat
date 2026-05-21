@@ -109,7 +109,8 @@ def esp(draw_list):
 
     loop_status = "Processing Entities..."
 
-    for i in range(64):
+    # Игроки занимают слоты с 1 по 64 (0 слот — это всегда мир/карта)
+    for i in range(1, 65):
         try:
             list_entry = pm.read_longlong(entity + (0x8 * (i >> 9) + 16))
             if not list_entry: continue
@@ -120,16 +121,21 @@ def esp(draw_list):
             entity_controller_pawn = pm.read_int(entity_controller + m_hPlayerPawn)
             if not entity_controller_pawn: continue
 
-            # СТАБИЛИЗАЦИЯ: Считаем только подтвержденные контроллеры игроков, чтобы счётчик не прыгал
+            # Засчитываем проверенного игрока (тот самый стабильный счётчик)
             stats["checked"] += 1
 
-            # ИСПРАВЛЕНО: Заменена маска с 0x7FFF на 0x1FFF для точного поиска Pawn в Source 2
-            list_entry2 = pm.read_longlong(entity + (0x8 * ((entity_controller_pawn & 0x1FFF) >> 9) + 16))
+            # =========================================================================
+            # ПОЛНЫЙ ЖЕЛЕЗОБЕТОННЫЙ РАСЧЕТ АДРЕСА PAWN (МАСКИРОВАНИЕ SOURCE 2)
+            # =========================================================================
+            pawn_idx = entity_controller_pawn & 0x7FFF
+            
+            list_entry2 = pm.read_longlong(entity + (0x8 * (pawn_idx >> 9) + 16))
             if not list_entry2: continue
 
-            entity_pawn = pm.read_longlong(list_entry2 + 120 * (entity_controller_pawn & 0x1FF))
+            entity_pawn = pm.read_longlong(list_entry2 + 120 * (pawn_idx & 0x1FF))
             if not entity_pawn or entity_pawn == local_player: continue
 
+            # Чтение параметров жизнедеятельности игрока
             entity_hp = pm.read_int(entity_pawn + m_iHealth)
             if entity_hp <= 0 or entity_hp > 100: continue
             stats["alive"] += 1
@@ -140,7 +146,7 @@ def esp(draw_list):
             game_scene = pm.read_longlong(entity_pawn + m_pGameSceneNode)
             if not game_scene: continue
 
-            # Читаем Origin игрока (База — ноги)
+            # Читаем позицию ног (Origin)
             feetX = pm.read_float(game_scene + m_vecOrigin)
             feetY = pm.read_float(game_scene + m_vecOrigin + 0x4)
             feetZ = pm.read_float(game_scene + m_vecOrigin + 0x8)
@@ -148,7 +154,7 @@ def esp(draw_list):
             headX, headY, headZ = feetX, feetY, feetZ + 68.0
             legZ = feetZ
 
-            # Пробуем считать точные кости скелета
+            # Попытка получить более точные координаты головы через кости
             try:
                 bone_matrix = pm.read_longlong(game_scene + m_modelState + 0x80)
                 if bone_matrix:
@@ -163,15 +169,15 @@ def esp(draw_list):
             except:
                 pass 
 
-            # Проекция на экран
+            # Проекция на плоскость экрана
             head_pos = w2s(view_matrix, headX, headY, headZ, WINDOW_WIDTH, WINDOW_HEIGHT)
             leg_pos = w2s(view_matrix, headX, headY, legZ, WINDOW_WIDTH, WINDOW_HEIGHT)
 
             if head_pos[0] == -999 or leg_pos[0] == -999: continue
             stats["on_screen"] += 1
 
-            # Рендеринг ESP рамок
-            color = imgui.get_color_u32_rgba(1, 0.2, 0.2, 1) # Яркий Красный
+            # Отрисовка 2D боксов вокруг противников
+            color = imgui.get_color_u32_rgba(1, 0.2, 0.2, 1) # Яркий красный цвет
             delta = abs(head_pos[1] - leg_pos[1])
             leftX = head_pos[0] - delta // 3.5
             rightX = head_pos[0] + delta // 3.5
@@ -181,6 +187,7 @@ def esp(draw_list):
             draw_list.add_line(rightX, leg_pos[1],  rightX, head_pos[1], color, 1.5)
             draw_list.add_line(leftX,  head_pos[1], rightX, head_pos[1], color, 1.5)
 
+            # Текст уровня здоровья рядом с боксом
             draw_list.add_text(leftX - 18, head_pos[1] - 5, color, f"{entity_hp}")
         except:
             continue
@@ -255,7 +262,7 @@ def main():
             
         imgui.end()
 
-        # СТРОГО БЕЗ ИМЕНИ АДМИНА: Название изменено на VibeCoder Non-Admin HUD
+        # СТРОГО БЕЗ ИМЕНИ АДМИНА: Название окна изменено на VibeCoder Non-Admin HUD
         imgui.set_next_window_position(10, 10)
         imgui.set_next_window_size(330, 190)
         imgui.begin("VibeCoder Non-Admin HUD", flags=imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_COLLAPSE)
