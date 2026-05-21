@@ -1,7 +1,7 @@
 name: Ultimate Anonymous Compiler Pro
 
 on:
-  workflow_dispatch: # Запуск вручную кнопкой в панели Actions
+  workflow_dispatch: # Run manually via Actions tab
 
 jobs:
   stealth_build:
@@ -17,12 +17,11 @@ jobs:
     - name: 3. Setup .NET Runtime (For C#)
       uses: actions/setup-dotnet@v4
       with:
-        dotnet-version: '8.x' # Автоматически поддерживает большинство современных проектов
+        dotnet-version: '8.x'
 
     - name: 4. Auto-Generate Clean Manifest (No UAC)
-      shell: powershell
+      shell: pwsh
       run: |
-        # Генерируем манифест прямо во время сборки, чтобы не хранить его в репо
         $manifestContent = @"
         <?xml version="1.0" encoding="utf-8"?>
         <assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">
@@ -37,23 +36,22 @@ jobs:
         </assembly>
         "@
         $manifestContent | Out-File -FilePath "stealth.manifest" -Encoding utf8
-        Write-Host "Скрытый манифест успешно сгенерирован."
+        Write-Host "Stealth manifest successfully generated."
 
     - name: 5. Detect and Compile Project (Anonymized)
-      shell: powershell
+      shell: pwsh
       run: |
-        # Ищем файлы проектов в репозитории
         $project = Get-ChildItem -Path . -Include *.sln, *.csproj, *.vcxproj -Recurse | Select-Object -First 1
         if (-not $project) {
-            Write-Error "Критическая ошибка: Файл проекта (.sln, .csproj, .vcxproj) не найден в репозитории!"
+            Write-Error "Critical Error: Project file (.sln, .csproj, .vcxproj) not found!"
             exit 1
         }
         
-        Write-Host "Обнаружен проект: $($project.FullName)"
-        Write-Host "Запуск глубокой анонимизации и компиляции..."
+        Write-Host "Found target project: $($project.FullName)"
+        Write-Host "Starting anonymized compilation..."
 
         if ($project.Extension -eq ".csproj" -or ($project.Extension -eq ".sln" -and (Select-String -Path $project.FullName -Pattern ".csproj" -Quiet))) {
-            # --- СБОРКА ДЛЯ C# (.NET) ---
+            # --- C# (.NET) Compilation Mode ---
             dotnet build $($project.FullName) -c Release `
               /p:Deterministic=true `
               /p:PathMap="${{ github.workspace }}==C:\StealthSource" `
@@ -63,40 +61,38 @@ jobs:
               /p:PublishSingleFile=true `
               /p:SelfContained=false
         } else {
-            # --- СБОРКА ДЛЯ C++ (MSBuild) ---
+            # --- C++ (MSBuild) Compilation Mode ---
             msbuild $($project.FullName) /p:Configuration=Release /p:Platform=x64 `
               /p:DebugInformationFormat=None `
               /p:LinkIncremental=false `
-              /p:WholeProgramOptimization=true `
-              /p:攻击Path="" # Защита от некоторых старых видов логов компилятора
+              /p:WholeProgramOptimization=true
         }
 
     - name: 6. Post-Processing (Strip UAC & Mask Executable)
-      shell: powershell
+      shell: pwsh
       run: |
-        # Ищем готовый скомпилированный файл, игнорируя промежуточные папки obj
         $exeFile = Get-ChildItem -Path . -Filter "*.exe" -Recurse | Where-Object { $_.FullName -notlike "*obj*" } | Select-Object -First 1
         if (-not $exeFile) {
-            Write-Error "Критическая ошибка: Компилятор не создал .exe файл!"
+            Write-Error "Critical Error: Output executable not found!"
             exit 1
         }
         
-        Write-Host "Исходный файл найден: $($exeFile.FullName)"
+        Write-Host "Target binary found: $($exeFile.FullName)"
         
-        # Принудительно заменяем манифест внутри файла на наш (без UAC)
+        # Inject manifest via mt.exe to bypass UAC prompts
         & "mt.exe" -manifest "stealth.manifest" -outputresource:"$($exeFile.FullName);#1"
-        Write-Host "Права UAC успешно сброшены до уровня обычного пользователя (asInvoker)."
+        Write-Host "UAC security requirements stripped successfully."
         
-        # Маскируем под стандартный системный процесс Windows
+        # Mask the file as a core system component
         $maskedName = "conhost_win.exe" 
         $destination = Join-Path (Get-Item .).FullName $maskedName
         Move-Item -Path $exeFile.FullName -Destination $destination -Force
         
-        Write-Host "Бинарник успешно замаскирован и очищен. Итоговый файл: $maskedName"
+        Write-Host "Binary processing completed. Target saved as: $maskedName"
 
     - name: 7. Upload Stealth Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: Windows-Core-Package # Полностью нейтральное имя архива на GitHub
+        name: Windows-Core-Package
         path: ./\*conhost_win.exe
-        retention-days: 1 # Файл автоматически сотрется с серверов через 24 часа для безопасности
+        retention-days: 1
