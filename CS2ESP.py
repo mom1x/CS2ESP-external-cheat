@@ -8,10 +8,11 @@ import glfw
 import OpenGL.GL as gl
 import requests
 
+# НАСТРОЙКА: Если твой монитор НЕ 1920x1080, поменяй эти цифры под свое разрешение экрана!
 WINDOW_WIDTH = 1920
 WINDOW_HEIGHT = 1080
 
-# Получение динамических смещений
+# Получение динамических смещений (дампер a2x)
 offsets = requests.get('https://raw.githubusercontent.com/a2x/cs2-dumper/main/output/offsets.json').json()
 client_dll = requests.get('https://raw.githubusercontent.com/a2x/cs2-dumper/main/output/client_dll.json').json()
 
@@ -26,7 +27,7 @@ m_modelState = client_dll['client.dll']['classes']['CSkeletonInstance']['fields'
 m_hPlayerPawn = client_dll['client.dll']['classes']['CCSPlayerController']['fields']['m_hPlayerPawn']
 m_iHealth = client_dll['client.dll']['classes']['C_BaseEntity']['fields']['m_iHealth']
 
-# Ожидаем запуска cs2.exe
+# Ожидаем запуска игры
 print("Waiting for cs2.exe...")
 while True:
     time.sleep(1)
@@ -39,7 +40,7 @@ while True:
 
 time.sleep(1)
 os.system("cls")
-print("CS2 Detected! Overlay is running.")
+print("CS2 Detected! Overlay is successfully attached.")
 
 def w2s(mtx, posx, posy, posz, width, height):
     screenW = mtx[12]*posx + mtx[13]*posy + mtx[14]*posz + mtx[15]
@@ -54,7 +55,7 @@ def w2s(mtx, posx, posy, posz, width, height):
     return [-999, -999]
 
 def esp(draw_list):
-    # Безопасное чтение глобальных данных кадра
+    # Безопасное чтение матрицы и локального игрока
     try:
         view_matrix = [pm.read_float(client + dwViewMatrix + i * 4) for i in range(16)]
         local_player = pm.read_longlong(client + dwLocalPlayerPawn)
@@ -64,9 +65,8 @@ def esp(draw_list):
     except:
         return
 
-    # Перебираем возможные слоты сущностей (макс. 64 игрока)
+    # Перебираем слоты сущностей (макс. 64 игрока)
     for i in range(64):
-        # Полная защита итерации: любой сбой памяти просто пропускает игрока
         try:
             entity = pm.read_longlong(client + dwEntityList)
             if not entity:
@@ -95,15 +95,15 @@ def esp(draw_list):
             if not entity_pawn or entity_pawn == local_player:
                 continue
 
-            # Проверяем, жив ли игрок (lifeState == 256)
-            if pm.read_int(entity_pawn + m_lifeState) != 256:
+            # ИСПРАВЛЕНО: В CS2 статус 0 означает, что игрок ЖИВ. Если не 0 — игрок мертв или возрождается, пропускаем его.
+            if pm.read_int(entity_pawn + m_lifeState) != 0:
                 continue
 
-            # Пропускаем тиммейтов
+            # Пропускаем тиммейтов (рисуем только врагов)
             if pm.read_int(entity_pawn + m_iTeamNum) == local_team:
                 continue
 
-            # Достаем указатель на матрицу костей для расчета позиций
+            # Достаем указатель на матрицу костей
             game_scene = pm.read_longlong(entity_pawn + m_pGameSceneNode)
             if not game_scene:
                 continue
@@ -112,40 +112,40 @@ def esp(draw_list):
             if not bone_matrix:
                 continue
 
-            # Координаты головы
+            # Координаты головы (кость 6)
             headX = pm.read_float(bone_matrix + 6 * 0x20)
             headY = pm.read_float(bone_matrix + 6 * 0x20 + 0x4)
             headZ = pm.read_float(bone_matrix + 6 * 0x20 + 0x8) + 8
             head_pos = w2s(view_matrix, headX, headY, headZ, WINDOW_WIDTH, WINDOW_HEIGHT)
 
-            # Координаты ног
+            # Координаты ног (кость 28)
             legZ = pm.read_float(bone_matrix + 28 * 0x20 + 0x8)
             leg_pos = w2s(view_matrix, headX, headY, legZ, WINDOW_WIDTH, WINDOW_HEIGHT)
 
-            # Если координаты за экраном, пропускаем отрисовку
+            # Если игрок находится вне зоны видимости (за спиной) — не рисуем
             if head_pos[0] == -999 or leg_pos[0] == -999:
                 continue
 
-            # Цвет бокса (Красный)
+            # Цвет бокса (Ярко-красный)
             color = imgui.get_color_u32_rgba(1, 0, 0, 1)
 
-            # Вычисление размеров бокса
+            # Расчет размеров рамки вокруг игрока
             delta = abs(head_pos[1] - leg_pos[1])
             leftX = head_pos[0] - delta // 3
             rightX = head_pos[0] + delta // 3
 
-            # Отрисовка линий бокса
+            # Отрисовка бокса
             draw_list.add_line(leftX,  leg_pos[1],  rightX, leg_pos[1],  color, 2.0)
             draw_list.add_line(leftX,  leg_pos[1],  leftX,  head_pos[1], color, 2.0)
             draw_list.add_line(rightX, leg_pos[1],  rightX, head_pos[1], color, 2.0)
             draw_list.add_line(leftX,  head_pos[1], rightX, head_pos[1], color, 2.0)
 
-            # Считывание и отрисовка ХП
+            # Считывание здоровья и вывод текста
             entity_hp = pm.read_int(entity_pawn + m_iHealth)
-            draw_list.add_text(leftX - 25, head_pos[1] - 5, color, str(entity_hp))
+            draw_list.add_text(leftX - 25, head_pos[1] - 5, color, f"HP: {entity_hp}")
 
         except (pymem.exception.WinAPIError, pymem.exception.MemoryReadError, Exception):
-            # Перехватываем ошибку 998 и любые другие сдвиги адресов, продолжая работу
+            # Перехват динамических изменений памяти (защита от краша при дисконнектах)
             continue
 
 def main():
@@ -175,7 +175,7 @@ def main():
     imgui.create_context()
     impl = GlfwRenderer(window)
 
-    # Основной графический цикл оверлея
+    # Главный цикл рендеринга
     while not glfw.window_should_close(window):
         glfw.poll_events()
         impl.process_inputs()
