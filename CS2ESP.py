@@ -16,29 +16,44 @@ except:
 WINDOW_WIDTH = win32api.GetSystemMetrics(0)
 WINDOW_HEIGHT = win32api.GetSystemMetrics(1)
 
-# Глобальные смещения
+# Глобальные смещения движка
 dwEntityList, dwLocalPlayerPawn, dwViewMatrix, dwLocalPlayerController = None, None, None, None
 m_iTeamNum, m_hPlayerPawn, m_iHealth, m_vecOrigin, m_pGameSceneNode = None, None, None, None, None
 m_modelState, m_entitySpottedState = None, None
 
 pm = None
 client = None
-config_status = "Checking local offsets..."
-game_status = "Waiting..."
+config_status = "STABLE"
+game_status = "WAITING CS2..."
 offsets_loaded = False
 stats = {"enemies": 0, "visible": 0}
 
-# Правильные индексы костей для CS2
-# 6 - голова, 5 - шея, 4 - верх груди, 0 - таз
-# 8, 9, 11 - левое плечо, локоть, кисть | 13, 14, 16 - правое плечо, локоть, кисть
-# 22, 23, 24 - левое бедро, колено, ступня | 25, 26, 27 - правое бедро, колено, ступня
+# Скелет: пары индексов костей для отрисовки линий
 BONE_CONNECTIONS = [
-    (5, 4), (4, 0),                     # Позвоночник (от шеи к тазу)
+    (6, 5), (5, 4), (4, 0),             # Позвоночник: Голова -> Шея -> Грудь -> Таз
     (5, 8), (8, 9), (9, 11),            # Левая рука
     (5, 13), (13, 14), (14, 16),        # Правая рука
     (0, 22), (22, 23), (23, 24),        # Левая нога
     (0, 25), (25, 26), (26, 27)         # Правая нога
 ]
+
+def apply_blood_theme():
+    """Кастомный черно-красный стиль Blood HUD"""
+    style = imgui.get_style()
+    
+    # Скругления элементов
+    style.window_rounding = 6.0
+    style.frame_rounding = 4.0
+    style.scrollbar_rounding = 3.0
+    
+    # Цветовая палитра (RGBA)
+    style.colors[imgui.COLOR_WINDOW_BACKGROUND] = [0.03, 0.02, 0.02, 0.88] # Глубокий черный фон
+    style.colors[imgui.COLOR_BORDER] = [0.55, 0.0, 0.0, 0.7]              # Кроваво-красная граница
+    style.colors[imgui.COLOR_TITLE_BG] = [0.35, 0.0, 0.0, 0.8]            # Темно-красный заголовок
+    style.colors[imgui.COLOR_TITLE_BG_ACTIVE] = [0.65, 0.0, 0.0, 0.95]     # Ярко-красный активный заголовок
+    style.colors[imgui.COLOR_TEXT] = [0.92, 0.92, 0.92, 1.0]              # Белый текст
+    style.colors[imgui.COLOR_SEPARATOR] = [0.45, 0.0, 0.0, 0.6]           # Разделитель
+
 
 def load_local_offsets():
     global dwEntityList, dwLocalPlayerPawn, dwViewMatrix, dwLocalPlayerController
@@ -49,7 +64,7 @@ def load_local_offsets():
     client_dll_path = os.path.join("offsets", "client_dll.json")
 
     if not os.path.exists(offsets_path) or not os.path.exists(client_dll_path):
-        config_status = "Error: Files missing!"
+        config_status = "ERR: JSON MISSING"
         return
 
     try:
@@ -73,10 +88,10 @@ def load_local_offsets():
         m_modelState = dw_classes['CSkeletonInstance']['fields']['m_modelState']
         m_entitySpottedState = dw_classes.get('C_CSPlayerPawn', {}).get('fields', {}).get('m_entitySpottedState', None)
 
-        config_status = "Offsets Ready!"
+        config_status = "BLOOD CONFIG LOADED"
         offsets_loaded = True
     except Exception as e:
-        config_status = f"Err: {str(e)}"
+        config_status = f"PARSER ERR"
 
 def w2s(mtx, posx, posy, posz):
     clipX = posx * mtx[0] + posy * mtx[1] + posz * mtx[2] + mtx[3]
@@ -88,20 +103,16 @@ def w2s(mtx, posx, posy, posz):
 
 def get_bone_position(pm, game_scene, bone_index):
     try:
-        # m_modelState — это сама структура внутри GameSceneNode, берем её адрес напрямую без read_longlong!
+        # Прямой адрес структуры без лишних read_longlong
         skeleton_address = game_scene + m_modelState
-        
-        # Читаем указатель на массив костей BoneArray (оффсет 0x80 внутри CSkeletonInstance)
         bone_array = pm.read_longlong(skeleton_address + 0x80) 
         if not bone_array: return None
         
-        # Каждая кость в массиве занимает ровно 32 байта
         bone_address = bone_array + (bone_index * 32)
         bx = pm.read_float(bone_address)
         by = pm.read_float(bone_address + 0x04)
         bz = pm.read_float(bone_address + 0x08)
         
-        # Проверка на пустые/дефолтные координаты, чтобы не было линий в центр экрана
         if bx == 0.0 and by == 0.0: return None
         return [bx, by, bz]
     except:
@@ -131,14 +142,15 @@ def esp(draw_list):
     if dwLocalPlayerController:
         try:
             local_ctrl = pm.read_longlong(client + dwLocalPlayerController)
-            for idx in range(1, 64):
+            for idx in range(1, 128): # Расширенный поиск локального игрока
                 le = pm.read_longlong(entity_list + (((8 * (idx & 0x7FFF)) >> 9) + 16))
                 if le and pm.read_longlong(le + 112 * (idx & 0x1FF)) == local_ctrl:
                     local_idx = idx
                     break
         except: pass
 
-    for i in range(1, 64):
+    # Сканируем до 128 сущностей, чтобы выцепить ВСЕХ ботов в кастомных сессиях
+    for i in range(1, 128):
         try:
             list_entry = pm.read_longlong(entity_list + ((8 * (i & 0x7FFF)) >> 9) + 16)
             if not list_entry: continue
@@ -168,11 +180,9 @@ def esp(draw_list):
             fy = pm.read_float(game_scene + m_vecOrigin + 0x4)
             fz = pm.read_float(game_scene + m_vecOrigin + 0x8)
 
-            # Расчет дистанции в метрах
             dx, dy, dz = fx - lx, fy - ly, fz - lz
             distance_meters = int(math.sqrt(dx*dx + dy*dy + dz*dz) / 39.37)
 
-            # Проверка видимости (Spotted)
             is_spotted = False
             if local_idx != -1 and m_entitySpottedState:
                 try:
@@ -182,13 +192,14 @@ def esp(draw_list):
                     is_spotted = (mask & (1 << (slot % 32))) != 0
                 except: pass
 
+            # Цвета под стиль Blood
             if is_spotted:
                 stats["visible"] += 1
-                color = imgui.get_color_u32_rgba(0.2, 1.0, 0.2, 1.0) # Зеленый box
+                color = imgui.get_color_u32_rgba(1.0, 0.1, 0.1, 0.95) # Алый для видимых целей
             else:
-                color = imgui.get_color_u32_rgba(1.0, 0.2, 0.2, 1.0) # Красный box
+                color = imgui.get_color_u32_rgba(0.5, 0.0, 0.0, 0.85) # Бордовый для скрытых
 
-            head_screen = w2s(view_matrix, fx, fy, fz + 72.0)
+            head_screen = w2s(view_matrix, fx, fy, fz + 74.0)
             leg_screen = w2s(view_matrix, fx, fy, fz)
             if not head_screen or not leg_screen: continue
 
@@ -196,29 +207,29 @@ def esp(draw_list):
             w_diff = h_diff / 1.8
             l_x, r_x = head_screen[0] - (w_diff / 2.0), head_screen[0] + (w_diff / 2.0)
 
-            # Отрисовка Рамки (Box)
-            draw_list.add_rect(l_x, head_screen[1], r_x, leg_screen[1], color, rounding=2.0, thickness=1.5)
+            # Отрисовка Box
+            draw_list.add_rect(l_x, head_screen[1], r_x, leg_screen[1], color, rounding=1.0, thickness=1.5)
 
-            # Вертикальный динамический ХП-Бар
+            # Вертикальный ХП-Бар
             bar_x = l_x - 6
             bar_top = head_screen[1]
             bar_bottom = leg_screen[1]
             bar_height = bar_bottom - bar_top
             
-            # Задний фон под полоску здоровья
-            draw_list.add_rect_filled(bar_x - 1, bar_top, bar_x + 2, bar_bottom, imgui.get_color_u32_rgba(0.0, 0.0, 0.0, 0.5))
-            
+            draw_list.add_rect_filled(bar_x - 1, bar_top, bar_x + 2, bar_bottom, imgui.get_color_u32_rgba(0.02, 0.02, 0.02, 0.6))
             health_perc = max(0, min(100, health)) / 100.0
             hp_bar_top = bar_bottom - (bar_height * health_perc)
-            hp_color = imgui.get_color_u32_rgba(1.0 - health_perc, health_perc, 0.0, 1.0)
+            
+            # Чистый кастомный градиент для Blood: от темно-бордового до неоново-красного
+            hp_color = imgui.get_color_u32_rgba(0.3 + (int(health_perc * 0.7)), 0.1 * health_perc, 0.1 * health_perc, 1.0)
             draw_list.add_rect_filled(bar_x - 1, hp_bar_top, bar_x + 2, bar_bottom, hp_color)
 
-            # Отображение дистанции в метрах под ногами
-            draw_list.add_text(l_x, leg_screen[1] + 2, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), f"{distance_meters}m")
+            # Дистанция в метрах
+            draw_list.add_text(l_x, leg_screen[1] + 2, imgui.get_color_u32_rgba(0.9, 0.9, 0.9, 1.0), f"{distance_meters}m")
 
-            # Сбор 2D координат костей для скелета
+            # Рендеринг скелета
             bone_positions_2d = {}
-            unique_bones = set([6] + [b for conn in BONE_CONNECTIONS for b in conn]) # 6 - кость головы
+            unique_bones = set([6] + [b for conn in BONE_CONNECTIONS for b in conn])
             
             for bone_id in unique_bones:
                 b_pos_3d = get_bone_position(pm, game_scene, bone_id)
@@ -227,24 +238,22 @@ def esp(draw_list):
                     if b_pos_2d:
                         bone_positions_2d[bone_id] = b_pos_2d
 
-            # Рисуем скелет, если точки прочитались корректно
-            bone_color = imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 0.8)
+            # Рисуем анатомические кости
+            bone_color = imgui.get_color_u32_rgba(0.9, 0.9, 0.9, 0.75) # Полупрозрачный белый скелет
             for connection in BONE_CONNECTIONS:
                 if connection[0] in bone_positions_2d and connection[1] in bone_positions_2d:
                     p1 = bone_positions_2d[connection[0]]
                     p2 = bone_positions_2d[connection[1]]
-                    # Валидация длины линий, чтобы избежать растягивания на весь экран при сбое кадра
-                    if math.hypot(p1[0]-p2[0], p1[1]-p2[1]) < h_diff * 1.2:
-                        draw_list.add_line(p1[0], p1[1], p2[0], p2[1], bone_color, 1.2)
+                    # Убрали баг с растягиванием костей на весь экран
+                    if math.hypot(p1[0]-p2[0], p1[1]-p2[1]) < h_diff * 1.5:
+                        draw_list.add_line(p1[0], p1[1], p2[0], p2[1], bone_color, 1.3)
 
-            # Аккуратный 2D-Круг на Голову (кость №6)
+            # Идеальный 2D-круг на голову врага
             if 6 in bone_positions_2d:
                 head_2d = bone_positions_2d[6]
-                # Радиус круга зависит от высоты модельки (чем ближе враг — тем больше круг)
-                dynamic_radius = max(3.0, h_diff / 11.5)
-                # Рисуем круг вокруг головы (зеленый/красный в зависимости от Spotted-статуса)
-                draw_list.add_circle(head_2d[0], head_2d[1], dynamic_radius, color, num_segments=16, thickness=1.5)
-
+                dynamic_radius = max(2.5, h_diff / 12.0)
+                # Рисуем контур круга головы цветом видимости
+                draw_list.add_circle(head_2d[0], head_2d[1], dynamic_radius, color, num_segments=18, thickness=1.5)
         except:
             continue
 
@@ -260,10 +269,10 @@ def try_connect_game():
                 pm.process_id = pid
                 pm.process_handle = handle
                 client = pymem.process.module_from_name(pm.process_handle, "client.dll").lpBaseOfDll
-                game_status = "Connected (User Mode)"
+                game_status = "CONNECTED"
                 return True
     except: pass
-    game_status = "Searching..."
+    game_status = "SEARCHING CS2..."
     return False
 
 def main():
@@ -285,8 +294,11 @@ def main():
 
     glfw.make_context_current(window)
     imgui.create_context()
+    
+    # Применяем кастомный стиль BLOOD
+    apply_blood_theme()
+    
     impl = GlfwRenderer(window)
-
     load_local_offsets()
     last_check = 0
 
@@ -305,14 +317,14 @@ def main():
         if offsets_loaded and pm: esp(imgui.get_window_draw_list())
         imgui.end()
 
-        # Маленькое оверлей-окошко дебага
-        imgui.set_next_window_position(20, 20)
-        imgui.set_next_window_size(260, 110)
-        imgui.begin("Vibe HUD Ultra Pro", flags=imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_COLLAPSE)
-        imgui.text(f"Game: {game_status}")
+        # Редизайн отладочного меню под Blood стиль
+        imgui.set_next_window_position(25, 25)
+        imgui.set_next_window_size(240, 115)
+        imgui.begin("BLOOD // EXTERNAL", flags=imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_COLLAPSE)
+        imgui.text(f"STATUS: {game_status}")
         imgui.separator()
-        imgui.text(f"Enemies: {stats['enemies']}")
-        imgui.text(f"Visible: {stats['visible']}")
+        imgui.text(f"ENEMIES PARSED: {stats['enemies']}")
+        imgui.text(f"TARGETS VISIBLE: {stats['visible']}")
         imgui.end()
 
         imgui.end_frame()
