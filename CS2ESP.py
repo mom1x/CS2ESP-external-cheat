@@ -23,7 +23,7 @@ WINDOW_HEIGHT = win32api.GetSystemMetrics(1)
 # Смещения памяти
 dwEntityList, dwLocalPlayerPawn, dwViewMatrix = None, None, None
 m_iTeamNum, m_lifeState, m_pGameSceneNode = None, None, None
-m_modelState, m_hPlayerPawn, m_iHealth = None, None, None
+m_modelState, m_hPlayerPawn, m_iHealth, m_vecOrigin = None, None, None, None # Добавлен m_vecOrigin
 
 pm = None
 client = None
@@ -35,7 +35,7 @@ stats = {"checked": 0, "alive": 0, "enemies": 0, "on_screen": 0}
 
 def load_local_offsets():
     global dwEntityList, dwLocalPlayerPawn, dwViewMatrix
-    global m_iTeamNum, m_lifeState, m_pGameSceneNode, m_modelState, m_hPlayerPawn, m_iHealth
+    global m_iTeamNum, m_lifeState, m_pGameSceneNode, m_modelState, m_hPlayerPawn, m_iHealth, m_vecOrigin
     global config_status, offsets_loaded
 
     offsets_path = os.path.join("offsets", "offsets.json")
@@ -62,6 +62,9 @@ def load_local_offsets():
         m_modelState = client_dll_data['client.dll']['classes']['CSkeletonInstance']['fields']['m_modelState']
         m_hPlayerPawn = client_dll_data['client.dll']['classes']['CCSPlayerController']['fields']['m_hPlayerPawn']
         m_iHealth = client_dll_data['client.dll']['classes']['C_BaseEntity']['fields']['m_iHealth']
+        
+        # ИСПРАВЛЕНО: Теперь оффсет вектора позиции корректно подтягивается из JSON
+        m_vecOrigin = client_dll_data['client.dll']['classes']['CGameSceneNode']['fields']['m_vecOrigin']
 
         config_status = "Offsets loaded successfully!"
         offsets_loaded = True
@@ -69,7 +72,7 @@ def load_local_offsets():
         config_status = f"Parser Error: {str(e)}"
         offsets_loaded = False
 
-# Исправленная функция World To Screen по rows (как у swedz в видео)
+# Функция World To Screen
 def w2s(mtx, posx, posy, posz, width, height):
     clipX = posx * mtx[0] + posy * mtx[1] + posz * mtx[2] + mtx[3]
     clipY = posx * mtx[4] + posy * mtx[5] + posz * mtx[6] + mtx[7]
@@ -107,73 +110,84 @@ def esp(draw_list):
 
     loop_status = "Processing Entities..."
 
-    # Первые 64 записи зарезервированы под контроллеры игроков (и ботов)
     for i in range(64):
         try:
-            # 0x10 = 16 (смещение первого листа)
             list_entry = pm.read_longlong(entity + (0x8 * (i >> 9) + 16))
             if not list_entry: continue
 
-            # Множитель ИСПРАВЛЕН на 120 (0x78 в хексе)
             entity_controller = pm.read_longlong(list_entry + 120 * (i & 0x1FF))
             if not entity_controller: continue
 
-            # Фикс счётчика: Увеличиваем checked СРАЗУ, как нашли живой контроллер слота игрока!
-            # Теперь число стабильно держится (например, 9), даже если игрок мёртв или выбирает команду.
             stats["checked"] += 1
 
-            # Достаем хэндл Pawn (персонажа на карте)
             entity_controller_pawn = pm.read_int(entity_controller + m_hPlayerPawn)
             if not entity_controller_pawn: continue
 
-            # Получаем вторую запись листа (уже для Pawn)
             list_entry2 = pm.read_longlong(entity + (0x8 * ((entity_controller_pawn & 0x7FFF) >> 9) + 16))
             if not list_entry2: continue
 
-            # Множитель ИСПРАВЛЕН на 120
             entity_pawn = pm.read_longlong(list_entry2 + 120 * (entity_controller_pawn & 0x1FF))
             if not entity_pawn or entity_pawn == local_player: continue
 
-            # Самая надежная проверка: живой ли игрок через ХП
             entity_hp = pm.read_int(entity_pawn + m_iHealth)
             if entity_hp <= 0 or entity_hp > 100: continue
             stats["alive"] += 1
 
-            # Проверка на тимейта
             if pm.read_int(entity_pawn + m_iTeamNum) == local_team: continue
             stats["enemies"] += 1
 
-            # Кости (Скелет персонажа)
             game_scene = pm.read_longlong(entity_pawn + m_pGameSceneNode)
-            bone_matrix = pm.read_longlong(game_scene + m_modelState + 0x80)
+            if not game_scene: continue
 
-            # Берем координаты головы (кость №6)
-            headX = pm.read_float(bone_matrix + 6 * 0x20)
-            headY = pm.read_float(bone_matrix + 6 * 0x20 + 0x4)
-            headZ = pm.read_float(bone_matrix + 6 * 0x20 + 0x8) + 6 # Смещение чуть выше головы
+            # =========================================================================
+            # 🔥 БУЛЕНЕПРОБИВАЕМЫЙ ДВУХУРОВНЕВЫЙ РАСЧЕТ КООРДИНАТ (БАЗА + КОСТИ)
+            # =========================================================================
+            
+            # Шаг 1: Читаем железобетонный Origin игрока из GameSceneNode (База — ноги)
+            feetX = pm.read_float(game_scene + m_vecOrigin)
+            feetY = pm.read_float(game_scene + m_vecOrigin + 0x4)
+            feetZ = pm.read_float(game_scene + m_vecOrigin + 0x8)
+            
+            # По умолчанию выставляем расчетную высоту головы (рост игрока ~68 единиц)
+            headX, headY, headZ = feetX, feetY, feetZ + 68.0
+            legZ = feetZ
+
+            # Шаг 2: Пробуем считать точные кости скелета. Если упадет — останемся на базе!
+            try:
+                bone_matrix = pm.read_longlong(game_scene + m_modelState + 0x80)
+                if bone_matrix:
+                    b_headX = pm.read_float(bone_matrix + 6 * 0x20)
+                    b_headY = pm.read_float(bone_matrix + 6 * 0x20 + 0x4)
+                    b_headZ = pm.read_float(bone_matrix + 6 * 0x20 + 0x8)
+                    b_legZ = pm.read_float(bone_matrix + 28 * 0x20 + 0x8)
+                    
+                    # Проверяем, что кости вернули не нулевой мусор
+                    if b_headX != 0.0 and b_headY != 0.0:
+                        headX, headY, headZ = b_headX, b_headY, b_headZ + 6.0
+                        legZ = b_legZ
+            except:
+                pass # Кости отвалились? Не страшно, сработает дефолтный Origin!
+
+            # Проекция на экран
             head_pos = w2s(view_matrix, headX, headY, headZ, WINDOW_WIDTH, WINDOW_HEIGHT)
-
-            # Берем координаты ног (кость №28)
-            legZ = pm.read_float(bone_matrix + 28 * 0x20 + 0x8)
             leg_pos = w2s(view_matrix, headX, headY, legZ, WINDOW_WIDTH, WINDOW_HEIGHT)
 
-            # Если точки за экраном — пропускаем отрисовку
             if head_pos[0] == -999 or leg_pos[0] == -999: continue
             stats["on_screen"] += 1
 
-            # Считаем размеры рамки ESP
+            # Отрезаем рамку ESP
             color = imgui.get_color_u32_rgba(1, 0.2, 0.2, 1) # Яркий Красный
             delta = abs(head_pos[1] - leg_pos[1])
             leftX = head_pos[0] - delta // 3.5
             rightX = head_pos[0] + delta // 3.5
 
-            # Отрисовка аккуратного бокса
+            # Отрисовка бокса
             draw_list.add_line(leftX,  leg_pos[1],  rightX, leg_pos[1],  color, 1.5)
             draw_list.add_line(leftX,  leg_pos[1],  leftX,  head_pos[1], color, 1.5)
             draw_list.add_line(rightX, leg_pos[1],  rightX, head_pos[1], color, 1.5)
             draw_list.add_line(leftX,  head_pos[1], rightX, head_pos[1], color, 1.5)
 
-            # Рисуем текст здоровья рядом с боксом
+            # Текст здоровья
             draw_list.add_text(leftX - 18, head_pos[1] - 5, color, f"{entity_hp}")
         except:
             continue
@@ -193,7 +207,7 @@ def try_connect_game():
                 pm.process_id = pid
                 pm.process_handle = handle
                 client = pymem.process.module_from_name(pm.process_handle, "client.dll").lpBaseOfDll
-                game_status = "CS2 Connected (User Mode)!"
+                game_status = "CS2 Connected!"
                 return True
     except:
         pass
@@ -248,15 +262,17 @@ def main():
             
         imgui.end()
 
-        # HUD Панель управления (VibeCoder Master HUD)
+        # Расширенный HUD Панели управления для точной отладки
         imgui.set_next_window_position(10, 10)
-        imgui.set_next_window_size(330, 160)
+        imgui.set_next_window_size(330, 190)
         imgui.begin("VibeCoder Master HUD", flags=imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_COLLAPSE)
         imgui.text(f"Offsets: {config_status}")
         imgui.text(f"Game Status: {game_status}")
         imgui.text(f"Diagnostic: {loop_status}")
         imgui.separator()
         imgui.text(f"Entities Checked: {stats['checked']}")
+        imgui.text(f"Alive Players: {stats['alive']}")
+        imgui.text(f"Enemies Found: {stats['enemies']}")
         imgui.text(f"Rendered Boxes: {stats['on_screen']}")
         imgui.end()
 
@@ -267,7 +283,6 @@ def main():
         impl.render(imgui.get_draw_data())
         glfw.swap_buffers(window)
         
-        # Разгрузка CPU (FPS ~140 кадров)
         time.sleep(0.007)
 
     impl.shutdown()
