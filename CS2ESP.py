@@ -46,11 +46,11 @@ def apply_blood_theme():
     style.frame_rounding = 4.0
     style.scrollbar_rounding = 3.0
     
-    # Цветовая палитра (RGBA)
+    # Исправленная цветовая палитра (RGBA) под синтаксис pyimgui
     style.colors[imgui.COLOR_WINDOW_BACKGROUND] = [0.03, 0.02, 0.02, 0.88] # Глубокий черный фон
     style.colors[imgui.COLOR_BORDER] = [0.55, 0.0, 0.0, 0.7]              # Кроваво-красная граница
-    style.colors[imgui.COLOR_TITLE_BG] = [0.35, 0.0, 0.0, 0.8]            # Темно-красный заголовок
-    style.colors[imgui.COLOR_TITLE_BG_ACTIVE] = [0.65, 0.0, 0.0, 0.95]     # Ярко-красный активный заголовок
+    style.colors[imgui.COLOR_TITLE_BACKGROUND] = [0.35, 0.0, 0.0, 0.8]     # Исправлено: Темно-красный заголовок
+    style.colors[imgui.COLOR_TITLE_BACKGROUND_ACTIVE] = [0.65, 0.0, 0.0, 0.95] # Исправлено: Ярко-красный активный заголовок
     style.colors[imgui.COLOR_TEXT] = [0.92, 0.92, 0.92, 1.0]              # Белый текст
     style.colors[imgui.COLOR_SEPARATOR] = [0.45, 0.0, 0.0, 0.6]           # Разделитель
 
@@ -103,7 +103,6 @@ def w2s(mtx, posx, posy, posz):
 
 def get_bone_position(pm, game_scene, bone_index):
     try:
-        # Прямой адрес структуры без лишних read_longlong
         skeleton_address = game_scene + m_modelState
         bone_array = pm.read_longlong(skeleton_address + 0x80) 
         if not bone_array: return None
@@ -142,14 +141,13 @@ def esp(draw_list):
     if dwLocalPlayerController:
         try:
             local_ctrl = pm.read_longlong(client + dwLocalPlayerController)
-            for idx in range(1, 128): # Расширенный поиск локального игрока
+            for idx in range(1, 128):
                 le = pm.read_longlong(entity_list + (((8 * (idx & 0x7FFF)) >> 9) + 16))
                 if le and pm.read_longlong(le + 112 * (idx & 0x1FF)) == local_ctrl:
                     local_idx = idx
                     break
         except: pass
 
-    # Сканируем до 128 сущностей, чтобы выцепить ВСЕХ ботов в кастомных сессиях
     for i in range(1, 128):
         try:
             list_entry = pm.read_longlong(entity_list + ((8 * (i & 0x7FFF)) >> 9) + 16)
@@ -192,12 +190,11 @@ def esp(draw_list):
                     is_spotted = (mask & (1 << (slot % 32))) != 0
                 except: pass
 
-            # Цвета под стиль Blood
             if is_spotted:
                 stats["visible"] += 1
-                color = imgui.get_color_u32_rgba(1.0, 0.1, 0.1, 0.95) # Алый для видимых целей
+                color = imgui.get_color_u32_rgba(1.0, 0.1, 0.1, 0.95)
             else:
-                color = imgui.get_color_u32_rgba(0.5, 0.0, 0.0, 0.85) # Бордовый для скрытых
+                color = imgui.get_color_u32_rgba(0.5, 0.0, 0.0, 0.85)
 
             head_screen = w2s(view_matrix, fx, fy, fz + 74.0)
             leg_screen = w2s(view_matrix, fx, fy, fz)
@@ -220,8 +217,7 @@ def esp(draw_list):
             health_perc = max(0, min(100, health)) / 100.0
             hp_bar_top = bar_bottom - (bar_height * health_perc)
             
-            # Чистый кастомный градиент для Blood: от темно-бордового до неоново-красного
-            hp_color = imgui.get_color_u32_rgba(0.3 + (int(health_perc * 0.7)), 0.1 * health_perc, 0.1 * health_perc, 1.0)
+            hp_color = imgui.get_color_u32_rgba(0.3 + (health_perc * 0.7), 0.1 * health_perc, 0.1 * health_perc, 1.0)
             draw_list.add_rect_filled(bar_x - 1, hp_bar_top, bar_x + 2, bar_bottom, hp_color)
 
             # Дистанция в метрах
@@ -238,21 +234,18 @@ def esp(draw_list):
                     if b_pos_2d:
                         bone_positions_2d[bone_id] = b_pos_2d
 
-            # Рисуем анатомические кости
-            bone_color = imgui.get_color_u32_rgba(0.9, 0.9, 0.9, 0.75) # Полупрозрачный белый скелет
+            bone_color = imgui.get_color_u32_rgba(0.9, 0.9, 0.9, 0.75)
             for connection in BONE_CONNECTIONS:
                 if connection[0] in bone_positions_2d and connection[1] in bone_positions_2d:
                     p1 = bone_positions_2d[connection[0]]
                     p2 = bone_positions_2d[connection[1]]
-                    # Убрали баг с растягиванием костей на весь экран
                     if math.hypot(p1[0]-p2[0], p1[1]-p2[1]) < h_diff * 1.5:
                         draw_list.add_line(p1[0], p1[1], p2[0], p2[1], bone_color, 1.3)
 
-            # Идеальный 2D-круг на голову врага
+            # Круг на голову
             if 6 in bone_positions_2d:
                 head_2d = bone_positions_2d[6]
                 dynamic_radius = max(2.5, h_diff / 12.0)
-                # Рисуем контур круга головы цветом видимости
                 draw_list.add_circle(head_2d[0], head_2d[1], dynamic_radius, color, num_segments=18, thickness=1.5)
         except:
             continue
@@ -281,7 +274,7 @@ def main():
     glfw.window_hint(glfw.FLOATING, glfw.TRUE)
     glfw.window_hint(glfw.RESIZABLE, glfw.FALSE)
     
-    window = glfw.create_window(WINDOW_WIDTH, WINDOW_HEIGHT, "VibeHUD", None, None)
+    window = glfw.create_window(WINDOW_WIDTH, WINDOW_HEIGHT, "BloodHUD", None, None)
     if not window:
         glfw.terminate()
         return
@@ -295,7 +288,6 @@ def main():
     glfw.make_context_current(window)
     imgui.create_context()
     
-    # Применяем кастомный стиль BLOOD
     apply_blood_theme()
     
     impl = GlfwRenderer(window)
@@ -317,7 +309,7 @@ def main():
         if offsets_loaded and pm: esp(imgui.get_window_draw_list())
         imgui.end()
 
-        # Редизайн отладочного меню под Blood стиль
+        # Меню в стиле Blood
         imgui.set_next_window_position(25, 25)
         imgui.set_next_window_size(240, 115)
         imgui.begin("BLOOD // EXTERNAL", flags=imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_COLLAPSE)
