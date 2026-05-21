@@ -15,6 +15,7 @@ except:
 
 WINDOW_WIDTH = win32api.GetSystemMetrics(0)
 WINDOW_HEIGHT = win32api.GetSystemMetrics(1)
+SCREEN_CENTER_X = WINDOW_WIDTH / 2
 
 # Глобальные смещения движка
 dwEntityList, dwLocalPlayerPawn, dwViewMatrix, dwLocalPlayerController = None, None, None, None
@@ -41,17 +42,16 @@ def apply_blood_theme():
     """Кастомный черно-красный стиль Blood HUD"""
     style = imgui.get_style()
     
-    # Скругления элементов
     style.window_rounding = 6.0
     style.frame_rounding = 4.0
     style.scrollbar_rounding = 3.0
     
-    style.colors[imgui.COLOR_WINDOW_BACKGROUND] = [0.03, 0.02, 0.02, 0.88] # Глубокий черный фон
-    style.colors[imgui.COLOR_BORDER] = [0.55, 0.0, 0.0, 0.7]              # Кроваво-красная граница
-    style.colors[imgui.COLOR_TITLE_BACKGROUND] = [0.35, 0.0, 0.0, 0.8]     # Темно-красный заголовок
-    style.colors[imgui.COLOR_TITLE_BACKGROUND_ACTIVE] = [0.65, 0.0, 0.0, 0.95] # Ярко-красный активный заголовок
-    style.colors[imgui.COLOR_TEXT] = [0.92, 0.92, 0.92, 1.0]              # Белый текст
-    style.colors[imgui.COLOR_SEPARATOR] = [0.45, 0.0, 0.0, 0.6]           # Разделитель
+    style.colors[imgui.COLOR_WINDOW_BACKGROUND] = [0.03, 0.02, 0.02, 0.88] 
+    style.colors[imgui.COLOR_BORDER] = [0.55, 0.0, 0.0, 0.7]              
+    style.colors[imgui.COLOR_TITLE_BACKGROUND] = [0.35, 0.0, 0.0, 0.8]     
+    style.colors[imgui.COLOR_TITLE_BACKGROUND_ACTIVE] = [0.65, 0.0, 0.0, 0.95] 
+    style.colors[imgui.COLOR_TEXT] = [0.92, 0.92, 0.92, 1.0]              
+    style.colors[imgui.COLOR_SEPARATOR] = [0.45, 0.0, 0.0, 0.6]           
 
 
 def load_local_offsets():
@@ -101,12 +101,11 @@ def w2s(mtx, posx, posy, posz):
     return None
 
 def get_bone_position(pm, bone_array, bone_index):
-    """Высокоскоростное чтение позиции кости за один вызов памяти"""
+    """Высокоскоростное чтение позиции кости блоком байт"""
     try:
         bone_address = bone_array + (bone_index * 32)
-        b_bytes = pm.read_bytes(bone_address, 12) # Читаем сразу 12 байт (3 float)
+        b_bytes = pm.read_bytes(bone_address, 12)
         bx, by, bz = struct.unpack('fff', b_bytes)
-        
         if bx == 0.0 and by == 0.0: return None
         return [bx, by, bz]
     except:
@@ -118,7 +117,7 @@ def esp(draw_list):
     stats = {"enemies": 0, "visible": 0}
 
     try:
-        # Оптимизация: Чтение матрицы за один системный вызов (64 байта)
+        # Оптимизация: Считывание матрицы 4х4 в один заход
         v_buff = pm.read_bytes(client + dwViewMatrix, 64)
         view_matrix = struct.unpack('16f', v_buff)
 
@@ -130,7 +129,6 @@ def esp(draw_list):
         if not entity_list: return
         
         local_scene = pm.read_longlong(local_pawn + m_pGameSceneNode)
-        # Оптимизация: Считываем позицию локального игрока за 1 раз
         l_bytes = pm.read_bytes(local_scene + m_vecOrigin, 12)
         lx, ly, lz = struct.unpack('fff', l_bytes)
     except: return
@@ -139,14 +137,14 @@ def esp(draw_list):
     if dwLocalPlayerController:
         try:
             local_ctrl = pm.read_longlong(client + dwLocalPlayerController)
-            for idx in range(1, 256): # Расширено для стабильного поиска на пабликах
+            for idx in range(1, 256):
                 le = pm.read_longlong(entity_list + (((8 * (idx & 0x7FFF)) >> 9) + 16))
                 if le and pm.read_longlong(le + 112 * (idx & 0x1FF)) == local_ctrl:
                     local_idx = idx
                     break
         except: pass
 
-    # Сетка сканирования расширена до 256 сущностей специально под заполненные public-сервера
+    # Сканирование 256 слотов под паблик-серверы
     for i in range(1, 256):
         try:
             list_entry = pm.read_longlong(entity_list + ((8 * (i & 0x7FFF)) >> 9) + 16)
@@ -173,7 +171,6 @@ def esp(draw_list):
             game_scene = pm.read_longlong(entity_pawn + m_pGameSceneNode)
             if not game_scene: continue
 
-            # Оптимизация: Чтение координат противника за один вызов
             f_bytes = pm.read_bytes(game_scene + m_vecOrigin, 12)
             fx, fy, fz = struct.unpack('fff', f_bytes)
 
@@ -189,11 +186,12 @@ def esp(draw_list):
                     is_spotted = (mask & (1 << (slot % 32))) != 0
                 except: pass
 
+            # Динамическая смена цвета: Зеленый если можно убить (виден), Красный если скрыт
             if is_spotted:
                 stats["visible"] += 1
-                color = imgui.get_color_u32_rgba(1.0, 0.1, 0.1, 0.95)
+                color = imgui.get_color_u32_rgba(0.0, 1.0, 0.2, 0.95)   # ЯРКО-ЗЕЛЕНЫЙ
             else:
-                color = imgui.get_color_u32_rgba(0.5, 0.0, 0.0, 0.85)
+                color = imgui.get_color_u32_rgba(0.55, 0.0, 0.0, 0.85)  # КРОВАВО-КРАСНЫЙ
 
             head_screen = w2s(view_matrix, fx, fy, fz + 74.0)
             leg_screen = w2s(view_matrix, fx, fy, fz)
@@ -203,10 +201,13 @@ def esp(draw_list):
             w_diff = h_diff / 1.8
             l_x, r_x = head_screen[0] - (w_diff / 2.0), head_screen[0] + (w_diff / 2.0)
 
-            # Отрисовка Box
+            # Отрисовка Бокса
             draw_list.add_rect(l_x, head_screen[1], r_x, leg_screen[1], color, rounding=1.0, thickness=1.5)
 
-            # Вертикальный ХП-Бар
+            # Трейсеры до ног противника
+            draw_list.add_line(SCREEN_CENTER_X, WINDOW_HEIGHT, leg_screen[0], leg_screen[1], color, 1.0)
+
+            # Вертикальный ХП-Бар без текста
             bar_x = l_x - 6
             bar_top = head_screen[1]
             bar_bottom = leg_screen[1]
@@ -222,9 +223,9 @@ def esp(draw_list):
             # Дистанция в метрах
             draw_list.add_text(l_x, leg_screen[1] + 2, imgui.get_color_u32_rgba(0.9, 0.9, 0.9, 1.0), f"{distance_meters}m")
 
-            # Рендеринг скелета с оптимизированным кэшированием массива костей
+            # Рендеринг скелета
             skeleton_address = game_scene + m_modelState
-            bone_array = pm.read_longlong(skeleton_address + 0x80) 
+            bone_array = pm.read_longlong(skeleton_address + 0x80)
             
             if bone_array:
                 bone_positions_2d = {}
@@ -289,7 +290,7 @@ def main():
     win32gui.SetWindowPos(hwnd, win32con.HWND_TOPMOST, 0, 0, 0, 0, win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE)
 
     glfw.make_context_current(window)
-    glfw.swap_interval(1) # Принудительная синхронизация кадров для устранения заикания линий оверлея
+    glfw.swap_interval(1)
     imgui.create_context()
     
     apply_blood_theme()
