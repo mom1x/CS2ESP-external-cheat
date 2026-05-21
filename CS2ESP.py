@@ -28,13 +28,16 @@ game_status = "Waiting..."
 offsets_loaded = False
 stats = {"enemies": 0, "visible": 0}
 
-# Скелет: пары индексов костей, которые нужно соединить линиями
+# Правильные индексы костей для CS2
+# 6 - голова, 5 - шея, 4 - верх груди, 0 - таз
+# 8, 9, 11 - левое плечо, локоть, кисть | 13, 14, 16 - правое плечо, локоть, кисть
+# 22, 23, 24 - левое бедро, колено, ступня | 25, 26, 27 - правое бедро, колено, ступня
 BONE_CONNECTIONS = [
-    (6, 5), (5, 4), (4, 0),             # Позвоночник: Голова -> Шея -> Грудь -> Таз
-    (5, 8), (8, 9), (9, 11),            # Левая рука: Шея -> Плечо -> Локоть -> Кисть
-    (5, 13), (13, 14), (14, 16),        # Правая рука: Шея -> Плечо -> Локоть -> Кисть
-    (0, 22), (22, 23), (23, 24),        # Левая нога: Таз -> Бедро -> Колено -> Ступня
-    (0, 25), (25, 26), (26, 27)         # Правая нога: Таз -> Бедро -> Колено -> Ступня
+    (5, 4), (4, 0),                     # Позвоночник (от шеи к тазу)
+    (5, 8), (8, 9), (9, 11),            # Левая рука
+    (5, 13), (13, 14), (14, 16),        # Правая рука
+    (0, 22), (22, 23), (23, 24),        # Левая нога
+    (0, 25), (25, 26), (26, 27)         # Правая нога
 ]
 
 def load_local_offsets():
@@ -67,7 +70,6 @@ def load_local_offsets():
         m_pGameSceneNode = dw_classes['C_BaseEntity']['fields']['m_pGameSceneNode']
         m_vecOrigin = dw_classes['CGameSceneNode']['fields']['m_vecOrigin']
         
-        # Оффсет скелета внутри GameSceneNode
         m_modelState = dw_classes['CSkeletonInstance']['fields']['m_modelState']
         m_entitySpottedState = dw_classes.get('C_CSPlayerPawn', {}).get('fields', {}).get('m_entitySpottedState', None)
 
@@ -86,18 +88,21 @@ def w2s(mtx, posx, posy, posz):
 
 def get_bone_position(pm, game_scene, bone_index):
     try:
-        # Попадаем в CSkeletonInstance (m_modelState)
-        skeleton = pm.read_longlong(game_scene + m_modelState)
-        if not skeleton: return None
-        # BoneArray — это указатель на массив матриц трансформации костей (обычно оффсет 0x80 или соседний)
-        bone_array = pm.read_longlong(skeleton + 0x80) 
+        # m_modelState — это сама структура внутри GameSceneNode, берем её адрес напрямую без read_longlong!
+        skeleton_address = game_scene + m_modelState
+        
+        # Читаем указатель на массив костей BoneArray (оффсет 0x80 внутри CSkeletonInstance)
+        bone_array = pm.read_longlong(skeleton_address + 0x80) 
         if not bone_array: return None
         
-        # Каждая кость занимает 32 байта (размер матрицы во float)
+        # Каждая кость в массиве занимает ровно 32 байта
         bone_address = bone_array + (bone_index * 32)
         bx = pm.read_float(bone_address)
-        by = pm.read_float(bone_address + 0x4)
-        bz = pm.read_float(bone_address + 0x8)
+        by = pm.read_float(bone_address + 0x04)
+        bz = pm.read_float(bone_address + 0x08)
+        
+        # Проверка на пустые/дефолтные координаты, чтобы не было линий в центр экрана
+        if bx == 0.0 and by == 0.0: return None
         return [bx, by, bz]
     except:
         return None
@@ -116,14 +121,12 @@ def esp(draw_list):
         entity_list = pm.read_longlong(client + dwEntityList)
         if not entity_list: return
         
-        # Получаем позицию локального игрока для расчета дистанции
         local_scene = pm.read_longlong(local_pawn + m_pGameSceneNode)
         lx = pm.read_float(local_scene + m_vecOrigin)
         ly = pm.read_float(local_scene + m_vecOrigin + 0x4)
         lz = pm.read_float(local_scene + m_vecOrigin + 0x8)
     except: return
 
-    # Индекс локального игрока для Spotted-проверки
     local_idx = -1
     if dwLocalPlayerController:
         try:
@@ -161,15 +164,13 @@ def esp(draw_list):
             game_scene = pm.read_longlong(entity_pawn + m_pGameSceneNode)
             if not game_scene: continue
 
-            # Координаты ног
             fx = pm.read_float(game_scene + m_vecOrigin)
             fy = pm.read_float(game_scene + m_vecOrigin + 0x4)
             fz = pm.read_float(game_scene + m_vecOrigin + 0x8)
 
-            # 1. Считаем дистанцию в метрах (1 метр в Source ≈ 39.37 юнитов)
+            # Расчет дистанции в метрах
             dx, dy, dz = fx - lx, fy - ly, fz - lz
-            distance_units = math.sqrt(dx*dx + dy*dy + dz*dz)
-            distance_meters = int(distance_units / 39.37)
+            distance_meters = int(math.sqrt(dx*dx + dy*dy + dz*dz) / 39.37)
 
             # Проверка видимости (Spotted)
             is_spotted = False
@@ -183,11 +184,10 @@ def esp(draw_list):
 
             if is_spotted:
                 stats["visible"] += 1
-                color = imgui.get_color_u32_rgba(0.2, 1.0, 0.2, 1.0) # Зеленый
+                color = imgui.get_color_u32_rgba(0.2, 1.0, 0.2, 1.0) # Зеленый box
             else:
-                color = imgui.get_color_u32_rgba(1.0, 0.2, 0.2, 1.0) # Красный
+                color = imgui.get_color_u32_rgba(1.0, 0.2, 0.2, 1.0) # Красный box
 
-            # Проекция на экран
             head_screen = w2s(view_matrix, fx, fy, fz + 72.0)
             leg_screen = w2s(view_matrix, fx, fy, fz)
             if not head_screen or not leg_screen: continue
@@ -196,34 +196,29 @@ def esp(draw_list):
             w_diff = h_diff / 1.8
             l_x, r_x = head_screen[0] - (w_diff / 2.0), head_screen[0] + (w_diff / 2.0)
 
-            # Отрисовка Бокса
+            # Отрисовка Рамки (Box)
             draw_list.add_rect(l_x, head_screen[1], r_x, leg_screen[1], color, rounding=2.0, thickness=1.5)
 
-            # 2. Вертикальный динамический ХП-Бар (слева от бокса на 6 пикселей)
+            # Вертикальный динамический ХП-Бар
             bar_x = l_x - 6
             bar_top = head_screen[1]
             bar_bottom = leg_screen[1]
             bar_height = bar_bottom - bar_top
             
-            # Задний черный фон под ХП
-            draw_list.add_rect_filled(bar_x - 1, bar_top, bar_x + 2, bar_bottom, imgui.get_color_u32_rgba(0.0, 0.0, 0.0, 0.6))
+            # Задний фон под полоску здоровья
+            draw_list.add_rect_filled(bar_x - 1, bar_top, bar_x + 2, bar_bottom, imgui.get_color_u32_rgba(0.0, 0.0, 0.0, 0.5))
             
-            # Вычисляем высоту полоски здоровья
             health_perc = max(0, min(100, health)) / 100.0
             hp_bar_top = bar_bottom - (bar_height * health_perc)
-            
-            # Градиент цвета: от зеленого (фулл) к красному (лоу ХП)
             hp_color = imgui.get_color_u32_rgba(1.0 - health_perc, health_perc, 0.0, 1.0)
             draw_list.add_rect_filled(bar_x - 1, hp_bar_top, bar_x + 2, bar_bottom, hp_color)
 
-            # 3. Отрисовка Дистанции под боксом
-            text_color = imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0)
-            draw_list.add_text(l_x, leg_screen[1] + 2, text_color, f"{distance_meters}m")
+            # Отображение дистанции в метрах под ногами
+            draw_list.add_text(l_x, leg_screen[1] + 2, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 1.0), f"{distance_meters}m")
 
-            # 4. Отрисовка Костей (Скелет)
+            # Сбор 2D координат костей для скелета
             bone_positions_2d = {}
-            # Собираем уникальные индексы костей, которые задействованы в скелете
-            unique_bones = set([b for conn in BONE_CONNECTIONS for b in conn])
+            unique_bones = set([6] + [b for conn in BONE_CONNECTIONS for b in conn]) # 6 - кость головы
             
             for bone_id in unique_bones:
                 b_pos_3d = get_bone_position(pm, game_scene, bone_id)
@@ -232,13 +227,24 @@ def esp(draw_list):
                     if b_pos_2d:
                         bone_positions_2d[bone_id] = b_pos_2d
 
-            # Рисуем линии костей
-            bone_color = imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 0.8) # Белые кости с небольшой прозрачностью
+            # Рисуем скелет, если точки прочитались корректно
+            bone_color = imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 0.8)
             for connection in BONE_CONNECTIONS:
                 if connection[0] in bone_positions_2d and connection[1] in bone_positions_2d:
                     p1 = bone_positions_2d[connection[0]]
                     p2 = bone_positions_2d[connection[1]]
-                    draw_list.add_line(p1[0], p1[1], p2[0], p2[1], bone_color, 1.2)
+                    # Валидация длины линий, чтобы избежать растягивания на весь экран при сбое кадра
+                    if math.hypot(p1[0]-p2[0], p1[1]-p2[1]) < h_diff * 1.2:
+                        draw_list.add_line(p1[0], p1[1], p2[0], p2[1], bone_color, 1.2)
+
+            # Аккуратный 2D-Круг на Голову (кость №6)
+            if 6 in bone_positions_2d:
+                head_2d = bone_positions_2d[6]
+                # Радиус круга зависит от высоты модельки (чем ближе враг — тем больше круг)
+                dynamic_radius = max(3.0, h_diff / 11.5)
+                # Рисуем круг вокруг головы (зеленый/красный в зависимости от Spotted-статуса)
+                draw_list.add_circle(head_2d[0], head_2d[1], dynamic_radius, color, num_segments=16, thickness=1.5)
+
         except:
             continue
 
@@ -248,7 +254,7 @@ def try_connect_game():
         process = pymem.process.process_from_name("cs2.exe")
         if process:
             pid = process.th32ProcessID
-            handle = ctypes.windll.kernel32.OpenProcess(0x0010 | 0x0400, False, pid) # Без админ-прав
+            handle = ctypes.windll.kernel32.OpenProcess(0x0010 | 0x0400, False, pid)
             if handle:
                 pm = pymem.Pymem()
                 pm.process_id = pid
@@ -299,15 +305,14 @@ def main():
         if offsets_loaded and pm: esp(imgui.get_window_draw_list())
         imgui.end()
 
-        # Меню мониторинга
+        # Маленькое оверлей-окошко дебага
         imgui.set_next_window_position(20, 20)
-        imgui.set_next_window_size(280, 130)
-        imgui.begin("Vibe HUD Ultra", flags=imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_COLLAPSE)
-        imgui.text(f"Offsets: {config_status}")
+        imgui.set_next_window_size(260, 110)
+        imgui.begin("Vibe HUD Ultra Pro", flags=imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_COLLAPSE)
         imgui.text(f"Game: {game_status}")
         imgui.separator()
-        imgui.text(f"Enemies In Game: {stats['enemies']}")
-        imgui.text(f"Visible (Spotted): {stats['visible']}")
+        imgui.text(f"Enemies: {stats['enemies']}")
+        imgui.text(f"Visible: {stats['visible']}")
         imgui.end()
 
         imgui.end_frame()
