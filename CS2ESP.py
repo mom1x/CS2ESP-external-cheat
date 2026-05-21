@@ -7,11 +7,20 @@ from imgui.integrations.glfw import GlfwRenderer
 import glfw
 import OpenGL.GL as gl
 
-# Автоопределение разрешения экрана
+# Включаем DPI Awareness, чтобы оверлей не косило при масштабировании Windows
+try:
+    ctypes.windll.shcore.SetProcessDpiAwareness(2)
+except:
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except:
+        pass
+
+# Получаем точное разрешение экрана после фикса DPI
 WINDOW_WIDTH = win32api.GetSystemMetrics(0)
 WINDOW_HEIGHT = win32api.GetSystemMetrics(1)
 
-# Глобальные переменные для смещений
+# Смещения памяти
 dwEntityList, dwLocalPlayerPawn, dwViewMatrix = None, None, None
 m_iTeamNum, m_lifeState, m_pGameSceneNode = None, None, None
 m_modelState, m_hPlayerPawn, m_iHealth = None, None, None
@@ -74,7 +83,7 @@ def w2s(mtx, posx, posy, posz, width, height):
 def esp(draw_list):
     global stats, pm, client, offsets_loaded, loop_status
     if not pm or not client or not offsets_loaded: 
-        loop_status = "Sleep (No Connection/Offsets)"
+        loop_status = "Sleep (No Connection)"
         return
 
     stats = {"checked": 0, "alive": 0, "enemies": 0, "on_screen": 0}
@@ -88,22 +97,20 @@ def esp(draw_list):
         local_team = pm.read_int(local_player + m_iTeamNum)
         entity = pm.read_longlong(client + dwEntityList)
     except:
-        loop_status = "Err: Basic memory read failed"
+        loop_status = "Err: Memory read failed"
         return
 
     if not entity:
-        loop_status = "Err: EntityList base is 0"
+        loop_status = "Err: EntityList list is 0"
         return
 
     loop_status = "Processing Entities..."
 
-    # Сканируем игроков (64 слота)
     for i in range(64):
         try:
             list_entry = pm.read_longlong(entity + (0x8 * (i >> 9) + 16))
             if not list_entry: continue
 
-            # ВАЖНО: Множитель изменен со 120 на 112 под новые патчи CS2!
             entity_controller = pm.read_longlong(list_entry + 112 * (i & 0x1FF))
             if not entity_controller: continue
 
@@ -113,7 +120,6 @@ def esp(draw_list):
             list_entry2 = pm.read_longlong(entity + (0x8 * ((entity_controller_pawn & 0x7FFF) >> 9) + 16))
             if not list_entry2: continue
 
-            # ВАЖНО: Здесь тоже меняем шаг на 112
             entity_pawn = pm.read_longlong(list_entry2 + 112 * (entity_controller_pawn & 0x1FF))
             if not entity_pawn or entity_pawn == local_player: continue
 
@@ -125,7 +131,7 @@ def esp(draw_list):
             if pm.read_int(entity_pawn + m_iTeamNum) == local_team: continue
             stats["enemies"] += 1
 
-            # Позиции костей (Голова и ноги)
+            # Кости
             game_scene = pm.read_longlong(entity_pawn + m_pGameSceneNode)
             bone_matrix = pm.read_longlong(game_scene + m_modelState + 0x80)
 
@@ -140,32 +146,30 @@ def esp(draw_list):
             if head_pos[0] == -999 or leg_pos[0] == -999: continue
             stats["on_screen"] += 1
 
-            # Рендер 2D Бокса
-            color = imgui.get_color_u32_rgba(1, 0, 0, 1) # Красный цвет
+            # Отрегулированные пропорции бокса (3.5 делает его аккуратнее)
+            color = imgui.get_color_u32_rgba(1, 0.2, 0.2, 1) 
             delta = abs(head_pos[1] - leg_pos[1])
-            leftX = head_pos[0] - delta // 3
-            rightX = head_pos[0] + delta // 3
+            leftX = head_pos[0] - delta // 3.5
+            rightX = head_pos[0] + delta // 3.5
 
-            draw_list.add_line(leftX,  leg_pos[1],  rightX, leg_pos[1],  color, 2.0)
-            draw_list.add_line(leftX,  leg_pos[1],  leftX,  head_pos[1], color, 2.0)
-            draw_list.add_line(rightX, leg_pos[1],  rightX, head_pos[1], color, 2.0)
-            draw_list.add_line(leftX,  head_pos[1], rightX, head_pos[1], color, 2.0)
+            # Рисуем бокс
+            draw_list.add_line(leftX,  leg_pos[1],  rightX, leg_pos[1],  color, 1.5)
+            draw_list.add_line(leftX,  leg_pos[1],  leftX,  head_pos[1], color, 1.5)
+            draw_list.add_line(rightX, leg_pos[1],  rightX, head_pos[1], color, 1.5)
+            draw_list.add_line(leftX,  head_pos[1], rightX, head_pos[1], color, 1.5)
 
+            # Текст здоровья чуть ближе к боксу
             entity_hp = pm.read_int(entity_pawn + m_iHealth)
-            draw_list.add_text(leftX - 25, head_pos[1] - 5, color, f"HP: {entity_hp}")
+            draw_list.add_text(leftX - 18, head_pos[1] - 5, color, f"{entity_hp}")
         except:
             continue
 
 def try_connect_game():
     global pm, client, game_status
     try:
-        # Находим процесс по имени БЕЗ открытия дескриптора
         process = pymem.process.process_from_name("cs2.exe")
         if process:
             pid = process.th32ProcessID
-            
-            # Открываем дескриптор вручную с минимальными флагами (Чтение + Инфо)
-            # Это полностью убирает требование запуска от Администратора!
             PROCESS_VM_READ = 0x0010
             PROCESS_QUERY_INFORMATION = 0x0400
             handle = ctypes.windll.kernel32.OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, False, pid)
@@ -174,8 +178,6 @@ def try_connect_game():
                 pm = pymem.Pymem()
                 pm.process_id = pid
                 pm.process_handle = handle
-                
-                # Получаем базовый адрес модуля (EnumProcessModules сработает под нашими флагами)
                 client = pymem.process.module_from_name(pm.process_handle, "client.dll").lpBaseOfDll
                 game_status = "CS2 Connected (User Mode)!"
                 return True
@@ -203,7 +205,7 @@ def main():
     
     ex_style = win32con.WS_EX_TRANSPARENT | win32con.WS_EX_LAYERED
     win32gui.SetWindowLong(hwnd, win32con.GWL_EXSTYLE, ex_style)
-    win32gui.SetWindowPos(hwnd, win32con.HWND_TOPMOST, -2, -2, 0, 0, win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE)
+    win32gui.SetWindowPos(hwnd, win32con.HWND_TOPMOST, 0, 0, 0, 0, win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE)
 
     glfw.make_context_current(window)
     imgui.create_context()
@@ -217,7 +219,6 @@ def main():
         impl.process_inputs()
         imgui.new_frame()
         
-        # Безопасное подключение без админа
         current_time = time.time()
         if not pm and current_time - last_check > 1.0:
             last_check = current_time
@@ -233,17 +234,15 @@ def main():
             
         imgui.end()
 
-        # Наш HUD для отслеживания прямо на экране
+        # HUD панели управления
         imgui.set_next_window_position(10, 10)
-        imgui.set_next_window_size(350, 170)
-        imgui.begin("VibeCoder Non-Admin HUD", flags=imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_COLLAPSE)
+        imgui.set_next_window_size(330, 160)
+        imgui.begin("VibeCoder Master HUD", flags=imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_COLLAPSE)
         imgui.text(f"Offsets: {config_status}")
         imgui.text(f"Game Status: {game_status}")
         imgui.text(f"Diagnostic: {loop_status}")
         imgui.separator()
         imgui.text(f"Entities Checked: {stats['checked']}")
-        imgui.text(f"Alive Players: {stats['alive']}")
-        imgui.text(f"Enemies Found: {stats['enemies']}")
         imgui.text(f"Rendered Boxes: {stats['on_screen']}")
         imgui.end()
 
@@ -253,6 +252,9 @@ def main():
         imgui.render()
         impl.render(imgui.get_draw_data())
         glfw.swap_buffers(window)
+        
+        # Разгружаем процессор (ограничиваем FPS оверлея ~140 кадров, чтобы не было лагов)
+        time.sleep(0.007)
 
     impl.shutdown()
     glfw.terminate()
