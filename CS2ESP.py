@@ -11,9 +11,16 @@ import requests
 WINDOW_WIDTH = 1920
 WINDOW_HEIGHT = 1080
 
-print("Loading offsets...")
-offsets = requests.get('https://raw.githubusercontent.com/a2x/cs2-dumper/main/output/offsets.json').json()
-client_dll = requests.get('https://raw.githubusercontent.com/a2x/cs2-dumper/main/output/client_dll.json').json()
+# Исправленные ссылки через зеркало CDN
+print("Loading offsets from mirror...")
+try:
+    offsets = requests.get('https://cdn.jsdelivr.net/gh/a2x/cs2-dumper@main/output/offsets.json', timeout=10).json()
+    client_dll = requests.get('https://cdn.jsdelivr.net/gh/a2x/cs2-dumper@main/output/client_dll.json', timeout=10).json()
+except Exception as e:
+    print(f"Network Error: {e}")
+    print("Не удалось загрузить оффсеты. Проверь интернет или попробуй включить VPN.")
+    time.sleep(5)
+    exit()
 
 dwEntityList = offsets['client.dll']['dwEntityList']
 dwLocalPlayerPawn = offsets['client.dll']['dwLocalPlayerPawn']
@@ -38,12 +45,10 @@ while True:
 
 print("CS2 Detected! Active Debug Mode.")
 
-# Переменные для вывода статистики в консоль
 last_debug_time = 0
 stats = {"checked": 0, "alive": 0, "enemies": 0, "on_screen": 0}
 
 def w2s(mtx, posx, posy, posz, width, height):
-    # Альтернативная (Column-Major) формула проекции для CS2, которая чаще всего исправляет пустой экран
     clipX = posx * mtx[0] + posy * mtx[4] + posz * mtx[8] + mtx[12]
     clipY = posx * mtx[1] + posy * mtx[5] + posz * mtx[9] + mtx[13]
     clipW = posx * mtx[3] + posy * mtx[7] + posz * mtx[11] + mtx[15]
@@ -59,7 +64,6 @@ def esp(draw_list):
     current_time = time.time()
     show_debug = False
     
-    # Сбрасываем дебаг-счетчики раз в секунду
     if current_time - last_debug_time > 1.0:
         show_debug = True
         last_debug_time = current_time
@@ -76,7 +80,6 @@ def esp(draw_list):
         if show_debug: print(f"Debug: Matrix/LocalPlayer read error: {e}")
         return
 
-    # Проверяем 64 слота игроков/ботов
     for i in range(64):
         try:
             entity = pm.read_longlong(client + dwEntityList)
@@ -99,15 +102,12 @@ def esp(draw_list):
 
             stats["checked"] += 1
 
-            # Проверка здоровья/жизни
             if pm.read_int(entity_pawn + m_lifeState) != 0: continue
             stats["alive"] += 1
 
-            # Проверка команды
             if pm.read_int(entity_pawn + m_iTeamNum) == local_team: continue
             stats["enemies"] += 1
 
-            # Позиции костей
             game_scene = pm.read_longlong(entity_pawn + m_pGameSceneNode)
             bone_matrix = pm.read_longlong(game_scene + m_modelState + 0x80)
 
@@ -122,7 +122,6 @@ def esp(draw_list):
             if head_pos[0] == -999 or leg_pos[0] == -999: continue
             stats["on_screen"] += 1
 
-            # Отрисовка
             color = imgui.get_color_u32_rgba(1, 0, 0, 1)
             delta = abs(head_pos[1] - leg_pos[1])
             leftX = head_pos[0] - delta // 3
