@@ -21,7 +21,6 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         
-        # Исправляем частую ошибку: в pip пакет называется 'pywin32', а не 'win32'
         if (Test-Path "requirements.txt") {
             (Get-Content requirements.txt) -replace '^win32$', 'pywin32' | Out-File requirements.txt -Encoding utf8
             pip install -r requirements.txt
@@ -34,7 +33,6 @@ jobs:
     - name: 4. Compile Project via PyInstaller
       shell: pwsh
       run: |
-        # Ищем главный скрипт в репозитории
         $mainScript = Get-ChildItem -Path . -Filter "*.py" | Select-Object -First 1
         if (-not $mainScript) {
             Write-Error "Critical Error: Python script (.py) not found in repository!"
@@ -43,9 +41,8 @@ jobs:
         
         Write-Host "Compiling script: $($mainScript.FullName)"
         
-        # Собираем в один файл (--onefile), отключаем консоль (--noconsole)
-        # Имя файла сразу задаем как conhost_win
-        pyinstaller --onefile --noconsole --name="conhost_win" $($mainScript.FullName)
+        # Добавлен флаг --collect-binaries glfw, который принудительно зашьет glfw3.dll внутрь exe
+        pyinstaller --onefile --noconsole --collect-binaries glfw --name="conhost_win" $($mainScript.FullName)
 
     - name: 5. Upload Compiled Executable
       uses: actions/upload-artifact@v4
