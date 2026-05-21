@@ -1,7 +1,7 @@
 import pymem
 import pymem.process
 import win32gui, win32con, win32api
-import time, os, json, ctypes, math
+import time, os, json, ctypes, math, struct
 import imgui
 from imgui.integrations.glfw import GlfwRenderer
 import glfw
@@ -28,15 +28,8 @@ game_status = "WAITING CS2..."
 offsets_loaded = False
 stats = {"enemies": 0, "visible": 0}
 
-# Состояние кнопок управления
-show_menu = True
-enable_esp = True
-insert_was_pressed = False
-f5_was_pressed = False
-
-# Скелет: пары индексов костей для отрисовки линий
 BONE_CONNECTIONS = [
-    (6, 5), (5, 4), (4, 0),             # Позвоночник: Голова -> Шея -> Грудь -> Таз
+    (6, 5), (5, 4), (4, 0),             # Позвоночник
     (5, 8), (8, 9), (9, 11),            # Левая рука
     (5, 13), (13, 14), (14, 16),        # Правая рука
     (0, 22), (22, 23), (23, 24),        # Левая нога
@@ -92,8 +85,8 @@ def load_local_offsets():
 
         config_status = "BLOOD CONFIG LOADED"
         offsets_loaded = True
-    except:
-        config_status = "PARSER ERR"
+    except Exception as e:
+        config_status = f"PARSER ERR"
 
 def w2s(mtx, posx, posy, posz):
     clipX = posx * mtx[0] + posy * mtx[1] + posz * mtx[2] + mtx[3]
@@ -103,28 +96,16 @@ def w2s(mtx, posx, posy, posz):
         return [(WINDOW_WIDTH / 2) + (clipX / clipW) * (WINDOW_WIDTH / 2), (WINDOW_HEIGHT / 2) - (clipY / clipW) * (WINDOW_HEIGHT / 2)]
     return None
 
-def get_bone_position(pm, game_scene, bone_index):
-    try:
-        skeleton_address = game_scene + m_modelState
-        bone_array = pm.read_longlong(skeleton_address + 0x80) 
-        if not bone_array: return None
-        
-        bone_address = bone_array + (bone_index * 32)
-        bx = pm.read_float(bone_address)
-        by = pm.read_float(bone_address + 0x04)
-        bz = pm.read_float(bone_address + 0x08)
-        
-        if bx == 0.0 and by == 0.0: return None
-        return [bx, by, bz]
-    except: return None
-
 def esp(draw_list):
     global stats
-    if not pm or not offsets_loaded or not enable_esp: return
+    if not pm or not offsets_loaded: return
     stats = {"enemies": 0, "visible": 0}
 
     try:
-        view_matrix = [pm.read_float(client + dwViewMatrix + i * 4) for i in range(16)]
+        # Оптимизация 1: Читаем всю матрицу за 1 запрос (64 байта) вместо 16 отдельных
+        v_buff = pm.read_bytes(client + dwViewMatrix, 64)
+        view_matrix = struct.unpack('16f', v_buff)
+
         local_pawn = pm.read_longlong(client + dwLocalPlayerPawn)
         if not local_pawn: return
         
@@ -133,26 +114,25 @@ def esp(draw_list):
         if not entity_list: return
         
         local_scene = pm.read_longlong(local_pawn + m_pGameSceneNode)
-        lx = pm.read_float(local_scene + m_vecOrigin)
-        ly = pm.read_float(local_scene + m_vecOrigin + 0x4)
-        lz = pm.read_float(local_scene + m_vecOrigin + 0x8)
+        # Оптимизация 2: Читаем Vector3 локального игрока за 1 запрос
+        l_xyz = struct.unpack('fff', pm.read_bytes(local_scene + m_vecOrigin, 12))
+        lx, ly, lz = l_xyz[0], l_xyz[1], l_xyz[2]
     except: return
 
     local_idx = -1
     if dwLocalPlayerController:
         try:
             local_ctrl = pm.read_longlong(client + dwLocalPlayerController)
-            for idx in range(1, 512):
-                le = pm.read_longlong(entity_list + 0x10 + 8 * ((idx & 0x7FFF) >> 9))
+            for idx in range(1, 128):
+                le = pm.read_longlong(entity_list + (((8 * (idx & 0x7FFF)) >> 9) + 16))
                 if le and pm.read_longlong(le + 112 * (idx & 0x1FF)) == local_ctrl:
                     local_idx = idx
                     break
         except: pass
 
-    # Скан до 512 сущностей гарантирует обнаружение всех отдаленных ботов
-    for i in range(1, 512):
+    for i in range(1, 128):
         try:
-            list_entry = pm.read_longlong(entity_list + 0x10 + 8 * ((i & 0x7FFF) >> 9))
+            list_entry = pm.read_longlong(entity_list + ((8 * (i & 0x7FFF)) >> 9) + 16)
             if not list_entry: continue
             controller = pm.read_longlong(list_entry + 112 * (i & 0x1FF))
             if not controller: continue
@@ -160,7 +140,7 @@ def esp(draw_list):
             pawn_handle = pm.read_uint(controller + m_hPlayerPawn)
             if not pawn_handle: continue
 
-            list_entry2 = pm.read_longlong(entity_list + 0x10 + 8 * ((pawn_handle & 0x7FFF) >> 9))
+            list_entry2 = pm.read_longlong(entity_list + (8 * ((pawn_handle & 0x7FFF) >> 9) + 16))
             if not list_entry2: continue
 
             entity_pawn = pm.read_longlong(list_entry2 + 112 * (pawn_handle & 0x1FF))
@@ -176,9 +156,9 @@ def esp(draw_list):
             game_scene = pm.read_longlong(entity_pawn + m_pGameSceneNode)
             if not game_scene: continue
 
-            fx = pm.read_float(game_scene + m_vecOrigin)
-            fy = pm.read_float(game_scene + m_vecOrigin + 0x4)
-            fz = pm.read_float(game_scene + m_vecOrigin + 0x8)
+            # Оптимизация 3: Читаем Vector3 врага за 1 запрос
+            f_xyz = struct.unpack('fff', pm.read_bytes(game_scene + m_vecOrigin, 12))
+            fx, fy, fz = f_xyz[0], f_xyz[1], f_xyz[2]
 
             dx, dy, dz = fx - lx, fy - ly, fz - lz
             distance_meters = int(math.sqrt(dx*dx + dy*dy + dz*dz) / 39.37)
@@ -192,12 +172,11 @@ def esp(draw_list):
                     is_spotted = (mask & (1 << (slot % 32))) != 0
                 except: pass
 
-            # Цвета: Зеленый — можно стрелять (виден), Бордовый — скрыт
             if is_spotted:
                 stats["visible"] += 1
-                color = imgui.get_color_u32_rgba(0.0, 0.95, 0.2, 0.95) # Токсично-зеленый
+                color = imgui.get_color_u32_rgba(1.0, 0.1, 0.1, 0.95)
             else:
-                color = imgui.get_color_u32_rgba(0.65, 0.0, 0.0, 0.85) # Кроваво-красный
+                color = imgui.get_color_u32_rgba(0.5, 0.0, 0.0, 0.85)
 
             head_screen = w2s(view_matrix, fx, fy, fz + 74.0)
             leg_screen = w2s(view_matrix, fx, fy, fz)
@@ -207,13 +186,10 @@ def esp(draw_list):
             w_diff = h_diff / 1.8
             l_x, r_x = head_screen[0] - (w_diff / 2.0), head_screen[0] + (w_diff / 2.0)
 
-            # Отрисовка линий (Snaplines) от центра низа экрана к ногам врага
-            draw_list.add_line(WINDOW_WIDTH / 2, WINDOW_HEIGHT, leg_screen[0], leg_screen[1], color, 1.0)
-
             # Отрисовка Box
             draw_list.add_rect(l_x, head_screen[1], r_x, leg_screen[1], color, rounding=1.0, thickness=1.5)
 
-            # Вертикальный ХП-Бар
+            # ХП-Бар
             bar_x = l_x - 6
             bar_top = head_screen[1]
             bar_bottom = leg_screen[1]
@@ -223,22 +199,31 @@ def esp(draw_list):
             health_perc = max(0, min(100, health)) / 100.0
             hp_bar_top = bar_bottom - (bar_height * health_perc)
             
-            hp_color = imgui.get_color_u32_rgba(0.3 + (health_perc * 0.7), 0.1 * health_perc, 0.1 * health_perc, 1.0) if not is_spotted else imgui.get_color_u32_rgba(0.0, 0.9, 0.2, 1.0)
+            hp_color = imgui.get_color_u32_rgba(0.3 + (health_perc * 0.7), 0.1 * health_perc, 0.1 * health_perc, 1.0)
             draw_list.add_rect_filled(bar_x - 1, hp_bar_top, bar_x + 2, bar_bottom, hp_color)
 
             # Дистанция
             draw_list.add_text(l_x, leg_screen[1] + 2, imgui.get_color_u32_rgba(0.9, 0.9, 0.9, 1.0), f"{distance_meters}m")
 
-            # Рендеринг скелета
+            # Оптимизация 4: Быстрое чтение скелета (вынесли указатель из цикла)
             bone_positions_2d = {}
-            unique_bones = set([6] + [b for conn in BONE_CONNECTIONS for b in conn])
+            skeleton_address = game_scene + m_modelState
+            bone_array = pm.read_longlong(skeleton_address + 0x80)
             
-            for bone_id in unique_bones:
-                b_pos_3d = get_bone_position(pm, game_scene, bone_id)
-                if b_pos_3d:
-                    b_pos_2d = w2s(view_matrix, b_pos_3d[0], b_pos_3d[1], b_pos_3d[2])
-                    if b_pos_2d: bone_positions_2d[bone_id] = b_pos_2d
+            if bone_array:
+                unique_bones = set([6] + [b for conn in BONE_CONNECTIONS for b in conn])
+                for bone_id in unique_bones:
+                    try:
+                        # Запрос позиции кости целиком (12 байт)
+                        b_bytes = pm.read_bytes(bone_array + (bone_id * 32), 12)
+                        bx, by, bz = struct.unpack('fff', b_bytes)
+                        if bx != 0.0 and by != 0.0:
+                            b_pos_2d = w2s(view_matrix, bx, by, bz)
+                            if b_pos_2d:
+                                bone_positions_2d[bone_id] = b_pos_2d
+                    except: pass
 
+            # Отрисовка костей
             bone_color = imgui.get_color_u32_rgba(0.9, 0.9, 0.9, 0.75)
             for connection in BONE_CONNECTIONS:
                 if connection[0] in bone_positions_2d and connection[1] in bone_positions_2d:
@@ -252,27 +237,8 @@ def esp(draw_list):
                 head_2d = bone_positions_2d[6]
                 dynamic_radius = max(2.5, h_diff / 12.0)
                 draw_list.add_circle(head_2d[0], head_2d[1], dynamic_radius, color, num_segments=18, thickness=1.5)
-        except: continue
-
-def handle_hotkeys():
-    """Обработка нажатий на горячие клавиши без залипаний"""
-    global show_menu, enable_esp, insert_was_pressed, f5_was_pressed
-    
-    # Клавиша INSERT (Скрытие/показ меню настроек)
-    if win32api.GetAsyncKeyState(win32con.VK_INSERT) & 0x8000:
-        if not insert_was_pressed:
-            show_menu = not show_menu
-            insert_was_pressed = True
-    else:
-        insert_was_pressed = False
-
-    # Клавиша F5 (Включение/выключение ВХ)
-    if win32api.GetAsyncKeyState(win32con.VK_F5) & 0x8000:
-        if not f5_was_pressed:
-            enable_esp = not enable_esp
-            f5_was_pressed = True
-    else:
-        f5_was_pressed = False
+        except:
+            continue
 
 def try_connect_game():
     global pm, client, game_status
@@ -310,8 +276,11 @@ def main():
     win32gui.SetWindowPos(hwnd, win32con.HWND_TOPMOST, 0, 0, 0, 0, win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE)
 
     glfw.make_context_current(window)
-    imgui.create_context()
     
+    # Оптимизация 5: Синхронизируем кадры окна с частотой обновления экрана
+    glfw.swap_interval(1)
+    
+    imgui.create_context()
     apply_blood_theme()
     
     impl = GlfwRenderer(window)
@@ -321,10 +290,6 @@ def main():
     while not glfw.window_should_close(window):
         glfw.poll_events()
         impl.process_inputs()
-        
-        # Сканируем хоткеи каждую итерацию
-        handle_hotkeys()
-        
         imgui.new_frame()
         
         if not pm and time.time() - last_check > 2.0:
@@ -334,21 +299,17 @@ def main():
         imgui.set_next_window_size(WINDOW_WIDTH, WINDOW_HEIGHT)
         imgui.set_next_window_position(0, 0)
         imgui.begin("Canvas", flags=imgui.WINDOW_NO_TITLE_BAR | imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_BACKGROUND)
-        if offsets_loaded and pm and enable_esp: 
-            esp(imgui.get_window_draw_list())
+        if offsets_loaded and pm: esp(imgui.get_window_draw_list())
         imgui.end()
 
-        # Меню BLOOD // EXTERNAL скрывается/открывается по кнопке Insert
-        if show_menu:
-            imgui.set_next_window_position(25, 25)
-            imgui.set_next_window_size(240, 130)
-            imgui.begin("BLOOD // EXTERNAL", flags=imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_COLLAPSE)
-            imgui.text(f"STATUS: {game_status}")
-            imgui.text(f"ESP STATE: {'ENABLED' if enable_esp else 'DISABLED'}")
-            imgui.separator()
-            imgui.text(f"ENEMIES PARSED: {stats['enemies'] if enable_esp else 0}")
-            imgui.text(f"TARGETS VISIBLE: {stats['visible'] if enable_esp else 0}")
-            imgui.end()
+        imgui.set_next_window_position(25, 25)
+        imgui.set_next_window_size(240, 115)
+        imgui.begin("BLOOD // EXTERNAL", flags=imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_COLLAPSE)
+        imgui.text(f"STATUS: {game_status}")
+        imgui.separator()
+        imgui.text(f"ENEMIES PARSED: {stats['enemies']}")
+        imgui.text(f"TARGETS VISIBLE: {stats['visible']}")
+        imgui.end()
 
         imgui.end_frame()
         gl.glClearColor(0, 0, 0, 0)
@@ -356,7 +317,7 @@ def main():
         imgui.render()
         impl.render(imgui.get_draw_data())
         glfw.swap_buffers(window)
-        time.sleep(0.003)
+        # Убрали жесткий sleep, так как теперь плавность контролируется через swap_interval
 
     impl.shutdown()
     glfw.terminate()
