@@ -55,7 +55,7 @@ jobs:
             Write-Host "Starting anonymized compilation..."
             
             if ($project.Extension -eq ".csproj" -or ($project.Extension -eq ".sln" -and (Select-String -Path $project.FullName -Pattern ".csproj" -Quiet))) {
-                # --- C# (.NET) Mode: Встраиваем манифест на этапе компиляции ---
+                # --- C# (.NET) Mode ---
                 dotnet build $($project.FullName) -c Release `
                   /p:ApplicationManifest="$manifestAbsPath" `
                   /p:Deterministic=true `
@@ -73,7 +73,7 @@ jobs:
                   /p:WholeProgramOptimization=true
             }
         } else {
-            # --- Python Mode: Встраиваем манифест прямо через PyInstaller ---
+            # --- Python Mode ---
             $pythonScript = $allFiles | Where-Object { $_.Name -eq 'main.py' } | Select-Object -First 1
             if (-not $pythonScript) {
                 $pythonScript = $allFiles | Where-Object { $_.Extension -eq '.py' } | Select-Object -First 1
@@ -82,6 +82,7 @@ jobs:
             if ($pythonScript) {
                 Write-Host "Detected Python source: $($pythonScript.FullName)"
                 python -m pip install --upgrade pip
+                pip install -r requirements.txt -ErrorAction SilentlyContinue # Ставим зависимости, если есть
                 pip install pyinstaller
                 
                 Write-Host "Compiling Python with native embedded manifest..."
@@ -92,10 +93,10 @@ jobs:
             }
         }
 
-    - name: 7. Post-Processing (Mask Executable & Hard UAC Strip Fallback)
+    - name: 7. Post-Processing (Mask Executable safely)
       shell: pwsh
       run: |
-        # Ищем готовый .exe файл
+        # Ищем готовый .exe файл, не трогая его структуру
         $exeFile = Get-ChildItem -Path . -Filter "*.exe" -Recurse | Where-Object { 
             $_.FullName -notlike "*obj*" -and 
             $_.FullName -notlike "*_internal*" 
@@ -108,17 +109,7 @@ jobs:
         
         Write-Host "Target binary isolated: $($exeFile.FullName)"
         
-        # Динамически ищем mt.exe в системе на случай, если это C++ проект
-        $mtPath = (Get-ChildItem -Path "C:\Program Files (x86)\Windows Kits" -Filter "mt.exe" -Recurse -ErrorAction SilentlyContinue | Where-Object { $_.FullName -like "*x64*" } | Select-Object -First 1).FullName
-        
-        if ($mtPath) {
-            Write-Host "Found Manifest Tool at: $mtPath. Enforcing UAC strip..."
-            & $mtPath -manifest "stealth.manifest" -outputresource:"$($exeFile.FullName);#1"
-        } else {
-            Write-Host "mt.exe not found in SDK paths, skipping secondary injection (native manifest already applied during build)."
-        }
-        
-        # Маскируем под системный файл Windows
+        # Просто переименовываем/маскируем файл без опасного вмешательства mt.exe
         $maskedName = "conhost_win.exe" 
         $destination = Join-Path (Get-Item .).FullName $maskedName
         Move-Item -Path $exeFile.FullName -Destination $destination -Force
