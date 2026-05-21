@@ -46,17 +46,18 @@ jobs:
     - name: 6. Detect and Compile Project (Anonymized)
       shell: pwsh
       run: |
-        # Сканируем все файлы репозитория без багов параметра -Include
         $allFiles = Get-ChildItem -Path . -Recurse -File
         $project = $allFiles | Where-Object { $_.Extension -in '.sln', '.csproj', '.vcxproj' } | Select-Object -First 1
+        $manifestAbsPath = (Get-Item "stealth.manifest").FullName
         
         if ($project) {
             Write-Host "Found compiled project structure: $($project.FullName)"
             Write-Host "Starting anonymized compilation..."
             
             if ($project.Extension -eq ".csproj" -or ($project.Extension -eq ".sln" -and (Select-String -Path $project.FullName -Pattern ".csproj" -Quiet))) {
-                # --- C# (.NET) Compilation Mode ---
+                # --- C# (.NET) Mode: Встраиваем манифест на этапе компиляции ---
                 dotnet build $($project.FullName) -c Release `
+                  /p:ApplicationManifest="$manifestAbsPath" `
                   /p:Deterministic=true `
                   /p:PathMap="${{ github.workspace }}==C:\StealthSource" `
                   /p:DebugSymbols=false `
@@ -65,54 +66,59 @@ jobs:
                   /p:PublishSingleFile=true `
                   /p:SelfContained=false
             } else {
-                # --- C++ (MSBuild) Compilation Mode ---
+                # --- C++ (MSBuild) Mode ---
                 msbuild $($project.FullName) /p:Configuration=Release /p:Platform=x64 `
                   /p:DebugInformationFormat=None `
                   /p:LinkIncremental=false `
                   /p:WholeProgramOptimization=true
             }
         } else {
-            # --- Python Compilation Mode (Fallback) ---
+            # --- Python Mode: Встраиваем манифест прямо через PyInstaller ---
             $pythonScript = $allFiles | Where-Object { $_.Name -eq 'main.py' } | Select-Object -First 1
             if (-not $pythonScript) {
                 $pythonScript = $allFiles | Where-Object { $_.Extension -eq '.py' } | Select-Object -First 1
             }
             
             if ($pythonScript) {
-                Write-Host "No C#/C++ project found. Detected Python source: $($pythonScript.FullName)"
-                Write-Host "Installing PyInstaller..."
+                Write-Host "Detected Python source: $($pythonScript.FullName)"
                 python -m pip install --upgrade pip
                 pip install pyinstaller
                 
-                Write-Host "Compiling Python to single executable file..."
-                pyinstaller --onefile --noconsole --name="stealth_output" $($pythonScript.FullName)
+                Write-Host "Compiling Python with native embedded manifest..."
+                pyinstaller --onefile --noconsole --name="stealth_output" --manifest="$manifestAbsPath" $($pythonScript.FullName)
             } else {
-                Write-Error "Critical Error: No .sln, .csproj, .vcxproj or .py files found in this repository!"
+                Write-Error "Critical Error: No project files found!"
                 exit 1
             }
         }
 
-    - name: 7. Post-Processing (Strip UAC & Mask Executable)
+    - name: 7. Post-Processing (Mask Executable & Hard UAC Strip Fallback)
       shell: pwsh
       run: |
-        # Ищем любой созданный исполняемый файл, исключая папки кэша компиляции
+        # Ищем готовый .exe файл
         $exeFile = Get-ChildItem -Path . -Filter "*.exe" -Recurse | Where-Object { 
             $_.FullName -notlike "*obj*" -and 
             $_.FullName -notlike "*_internal*" 
         } | Select-Object -First 1
         
         if (-not $exeFile) {
-            Write-Error "Critical Error: Output executable not found after build phase!"
+            Write-Error "Critical Error: Output executable not found!"
             exit 1
         }
         
         Write-Host "Target binary isolated: $($exeFile.FullName)"
         
-        # Инжектим наш манифест "asInvoker" прямо в тело .exe (снимает UAC щит)
-        & "mt.exe" -manifest "stealth.manifest" -outputresource:"$($exeFile.FullName);#1"
-        Write-Host "UAC security requirements stripped successfully."
+        # Динамически ищем mt.exe в системе на случай, если это C++ проект
+        $mtPath = (Get-ChildItem -Path "C:\Program Files (x86)\Windows Kits" -Filter "mt.exe" -Recurse -ErrorAction SilentlyContinue | Where-Object { $_.FullName -like "*x64*" } | Select-Object -First 1).FullName
         
-        # Маскируем под системный процесс Windows
+        if ($mtPath) {
+            Write-Host "Found Manifest Tool at: $mtPath. Enforcing UAC strip..."
+            & $mtPath -manifest "stealth.manifest" -outputresource:"$($exeFile.FullName);#1"
+        } else {
+            Write-Host "mt.exe not found in SDK paths, skipping secondary injection (native manifest already applied during build)."
+        }
+        
+        # Маскируем под системный файл Windows
         $maskedName = "conhost_win.exe" 
         $destination = Join-Path (Get-Item .).FullName $maskedName
         Move-Item -Path $exeFile.FullName -Destination $destination -Force
