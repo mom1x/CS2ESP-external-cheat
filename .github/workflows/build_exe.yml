@@ -19,7 +19,12 @@ jobs:
       with:
         dotnet-version: '8.x'
 
-    - name: 4. Auto-Generate Clean Manifest (No UAC)
+    - name: 4. Setup Python Environment (Fallback for Python scripts)
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.x'
+
+    - name: 5. Auto-Generate Clean Manifest (No UAC)
       shell: pwsh
       run: |
         $manifestContent = @"
@@ -38,59 +43,83 @@ jobs:
         $manifestContent | Out-File -FilePath "stealth.manifest" -Encoding utf8
         Write-Host "Stealth manifest successfully generated."
 
-    - name: 5. Detect and Compile Project (Anonymized)
+    - name: 6. Detect and Compile Project (Anonymized)
       shell: pwsh
       run: |
-        $project = Get-ChildItem -Path . -Include *.sln, *.csproj, *.vcxproj -Recurse | Select-Object -First 1
-        if (-not $project) {
-            Write-Error "Critical Error: Project file (.sln, .csproj, .vcxproj) not found!"
-            exit 1
-        }
+        # Сканируем все файлы репозитория без багов параметра -Include
+        $allFiles = Get-ChildItem -Path . -Recurse -File
+        $project = $allFiles | Where-Object { $_.Extension -in '.sln', '.csproj', '.vcxproj' } | Select-Object -First 1
         
-        Write-Host "Found target project: $($project.FullName)"
-        Write-Host "Starting anonymized compilation..."
-
-        if ($project.Extension -eq ".csproj" -or ($project.Extension -eq ".sln" -and (Select-String -Path $project.FullName -Pattern ".csproj" -Quiet))) {
-            # --- C# (.NET) Compilation Mode ---
-            dotnet build $($project.FullName) -c Release `
-              /p:Deterministic=true `
-              /p:PathMap="${{ github.workspace }}==C:\StealthSource" `
-              /p:DebugSymbols=false `
-              /p:DebugType=none `
-              /p:GenerateAssemblyInfo=false `
-              /p:PublishSingleFile=true `
-              /p:SelfContained=false
+        if ($project) {
+            Write-Host "Found compiled project structure: $($project.FullName)"
+            Write-Host "Starting anonymized compilation..."
+            
+            if ($project.Extension -eq ".csproj" -or ($project.Extension -eq ".sln" -and (Select-String -Path $project.FullName -Pattern ".csproj" -Quiet))) {
+                # --- C# (.NET) Compilation Mode ---
+                dotnet build $($project.FullName) -c Release `
+                  /p:Deterministic=true `
+                  /p:PathMap="${{ github.workspace }}==C:\StealthSource" `
+                  /p:DebugSymbols=false `
+                  /p:DebugType=none `
+                  /p:GenerateAssemblyInfo=false `
+                  /p:PublishSingleFile=true `
+                  /p:SelfContained=false
+            } else {
+                # --- C++ (MSBuild) Compilation Mode ---
+                msbuild $($project.FullName) /p:Configuration=Release /p:Platform=x64 `
+                  /p:DebugInformationFormat=None `
+                  /p:LinkIncremental=false `
+                  /p:WholeProgramOptimization=true
+            }
         } else {
-            # --- C++ (MSBuild) Compilation Mode ---
-            msbuild $($project.FullName) /p:Configuration=Release /p:Platform=x64 `
-              /p:DebugInformationFormat=None `
-              /p:LinkIncremental=false `
-              /p:WholeProgramOptimization=true
+            # --- Python Compilation Mode (Fallback) ---
+            $pythonScript = $allFiles | Where-Object { $_.Name -eq 'main.py' } | Select-Object -First 1
+            if (-not $pythonScript) {
+                $pythonScript = $allFiles | Where-Object { $_.Extension -eq '.py' } | Select-Object -First 1
+            }
+            
+            if ($pythonScript) {
+                Write-Host "No C#/C++ project found. Detected Python source: $($pythonScript.FullName)"
+                Write-Host "Installing PyInstaller..."
+                python -m pip install --upgrade pip
+                pip install pyinstaller
+                
+                Write-Host "Compiling Python to single executable file..."
+                pyinstaller --onefile --noconsole --name="stealth_output" $($pythonScript.FullName)
+            } else {
+                Write-Error "Critical Error: No .sln, .csproj, .vcxproj or .py files found in this repository!"
+                exit 1
+            }
         }
 
-    - name: 6. Post-Processing (Strip UAC & Mask Executable)
+    - name: 7. Post-Processing (Strip UAC & Mask Executable)
       shell: pwsh
       run: |
-        $exeFile = Get-ChildItem -Path . -Filter "*.exe" -Recurse | Where-Object { $_.FullName -notlike "*obj*" } | Select-Object -First 1
+        # Ищем любой созданный исполняемый файл, исключая папки кэша компиляции
+        $exeFile = Get-ChildItem -Path . -Filter "*.exe" -Recurse | Where-Object { 
+            $_.FullName -notlike "*obj*" -and 
+            $_.FullName -notlike "*_internal*" 
+        } | Select-Object -First 1
+        
         if (-not $exeFile) {
-            Write-Error "Critical Error: Output executable not found!"
+            Write-Error "Critical Error: Output executable not found after build phase!"
             exit 1
         }
         
-        Write-Host "Target binary found: $($exeFile.FullName)"
+        Write-Host "Target binary isolated: $($exeFile.FullName)"
         
-        # Inject manifest via mt.exe to bypass UAC prompts
+        # Инжектим наш манифест "asInvoker" прямо в тело .exe (снимает UAC щит)
         & "mt.exe" -manifest "stealth.manifest" -outputresource:"$($exeFile.FullName);#1"
         Write-Host "UAC security requirements stripped successfully."
         
-        # Mask the file as a core system component
+        # Маскируем под системный процесс Windows
         $maskedName = "conhost_win.exe" 
         $destination = Join-Path (Get-Item .).FullName $maskedName
         Move-Item -Path $exeFile.FullName -Destination $destination -Force
         
         Write-Host "Binary processing completed. Target saved as: $maskedName"
 
-    - name: 7. Upload Stealth Artifact
+    - name: 8. Upload Stealth Artifact
       uses: actions/upload-artifact@v4
       with:
         name: Windows-Core-Package
