@@ -7,7 +7,7 @@ from imgui.integrations.glfw import GlfwRenderer
 import glfw
 import OpenGL.GL as gl
 
-# Включаем DPI Awareness, чтобы оверлей не косило при масштабировании Windows
+# Включаем DPI Awareness, чтобы сетка координат не съезжала
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(2)
 except:
@@ -16,7 +16,7 @@ except:
     except:
         pass
 
-# Получаем точное разрешение экрана
+# Разрешение экрана
 WINDOW_WIDTH = win32api.GetSystemMetrics(0)
 WINDOW_HEIGHT = win32api.GetSystemMetrics(1)
 
@@ -62,7 +62,6 @@ def load_local_offsets():
         m_modelState = client_dll_data['client.dll']['classes']['CSkeletonInstance']['fields']['m_modelState']
         m_hPlayerPawn = client_dll_data['client.dll']['classes']['CCSPlayerController']['fields']['m_hPlayerPawn']
         m_iHealth = client_dll_data['client.dll']['classes']['C_BaseEntity']['fields']['m_iHealth']
-        
         m_vecOrigin = client_dll_data['client.dll']['classes']['CGameSceneNode']['fields']['m_vecOrigin']
 
         config_status = "Offsets loaded successfully!"
@@ -71,7 +70,6 @@ def load_local_offsets():
         config_status = f"Parser Error: {str(e)}"
         offsets_loaded = False
 
-# Функция World To Screen
 def w2s(mtx, posx, posy, posz, width, height):
     clipX = posx * mtx[0] + posy * mtx[1] + posz * mtx[2] + mtx[3]
     clipY = posx * mtx[4] + posy * mtx[5] + posz * mtx[6] + mtx[7]
@@ -98,55 +96,56 @@ def esp(draw_list):
             loop_status = "In Main Menu / Loading Match"
             return
         local_team = pm.read_int(local_player + m_iTeamNum)
-        entity = pm.read_longlong(client + dwEntityList)
     except:
-        loop_status = "Err: Memory read failed"
+        loop_status = "Err: Critical memory read failed"
         return
 
-    if not entity:
-        loop_status = "Err: EntityList list is 0"
-        return
-
+    # МЕТОД SWEDZ: Берём чистый адрес структуры, БЕЗ преждевременного чтения памяти
+    entity_list_base = client + dwEntityList
     loop_status = "Processing Entities..."
 
-    # Игроки занимают слоты с 1 по 64 (0 слот — это всегда мир/карта)
+    # Проходим по контроллерам игроков (слоты 1-64)
     for i in range(1, 65):
         try:
-            list_entry = pm.read_longlong(entity + (0x8 * (i >> 9) + 16))
+            # Вычисляем правильный list_entry для контроллера
+            list_entry = pm.read_longlong(entity_list_base + (8 * (i >> 9) + 16))
             if not list_entry: continue
 
+            # Находим сам контроллер игрока
             entity_controller = pm.read_longlong(list_entry + 120 * (i & 0x1FF))
             if not entity_controller: continue
 
+            # Достаем хэндл его Pawn тела
             entity_controller_pawn = pm.read_int(entity_controller + m_hPlayerPawn)
             if not entity_controller_pawn: continue
 
-            # Засчитываем проверенного игрока (тот самый стабильный счётчик)
+            # Теперь этот счётчик инкрементируется честно, находя реальные контроллеры!
             stats["checked"] += 1
 
-            # =========================================================================
-            # ПОЛНЫЙ ЖЕЛЕЗОБЕТОННЫЙ РАСЧЕТ АДРЕСА PAWN (МАСКИРОВАНИЕ SOURCE 2)
-            # =========================================================================
+            # Битовая маска Swedz для расшифровки хэндла Pawn
             pawn_idx = entity_controller_pawn & 0x7FFF
             
-            list_entry2 = pm.read_longlong(entity + (0x8 * (pawn_idx >> 9) + 16))
+            # Направляемся во второй list_entry, где лежат сами Pawn (тела)
+            list_entry2 = pm.read_longlong(entity_list_base + (8 * (pawn_idx >> 9) + 16))
             if not list_entry2: continue
 
+            # Получаем чистый указатель на Pawn в памяти игрового движка
             entity_pawn = pm.read_longlong(list_entry2 + 120 * (pawn_idx & 0x1FF))
             if not entity_pawn or entity_pawn == local_player: continue
 
-            # Чтение параметров жизнедеятельности игрока
+            # Проверка здоровья
             entity_hp = pm.read_int(entity_pawn + m_iHealth)
             if entity_hp <= 0 or entity_hp > 100: continue
             stats["alive"] += 1
 
+            # Проверка команды (отсеиваем союзников)
             if pm.read_int(entity_pawn + m_iTeamNum) == local_team: continue
             stats["enemies"] += 1
 
             game_scene = pm.read_longlong(entity_pawn + m_pGameSceneNode)
             if not game_scene: continue
 
-            # Читаем позицию ног (Origin)
+            # Координаты ног (Origin)
             feetX = pm.read_float(game_scene + m_vecOrigin)
             feetY = pm.read_float(game_scene + m_vecOrigin + 0x4)
             feetZ = pm.read_float(game_scene + m_vecOrigin + 0x8)
@@ -154,7 +153,7 @@ def esp(draw_list):
             headX, headY, headZ = feetX, feetY, feetZ + 68.0
             legZ = feetZ
 
-            # Попытка получить более точные координаты головы через кости
+            # Коррекция положения головы по костям (скелетная модель)
             try:
                 bone_matrix = pm.read_longlong(game_scene + m_modelState + 0x80)
                 if bone_matrix:
@@ -169,15 +168,15 @@ def esp(draw_list):
             except:
                 pass 
 
-            # Проекция на плоскость экрана
+            # Перевод 3D координат в 2D пиксели экрана
             head_pos = w2s(view_matrix, headX, headY, headZ, WINDOW_WIDTH, WINDOW_HEIGHT)
             leg_pos = w2s(view_matrix, headX, headY, legZ, WINDOW_WIDTH, WINDOW_HEIGHT)
 
             if head_pos[0] == -999 or leg_pos[0] == -999: continue
             stats["on_screen"] += 1
 
-            # Отрисовка 2D боксов вокруг противников
-            color = imgui.get_color_u32_rgba(1, 0.2, 0.2, 1) # Яркий красный цвет
+            # Отрисовка бокса вокруг врага
+            color = imgui.get_color_u32_rgba(1.0, 0.1, 0.1, 1.0) # Насыщенный красный
             delta = abs(head_pos[1] - leg_pos[1])
             leftX = head_pos[0] - delta // 3.5
             rightX = head_pos[0] + delta // 3.5
@@ -187,8 +186,8 @@ def esp(draw_list):
             draw_list.add_line(rightX, leg_pos[1],  rightX, head_pos[1], color, 1.5)
             draw_list.add_line(leftX,  head_pos[1], rightX, head_pos[1], color, 1.5)
 
-            # Текст уровня здоровья рядом с боксом
-            draw_list.add_text(leftX - 18, head_pos[1] - 5, color, f"{entity_hp}")
+            # Текст здоровья рядом с боксом
+            draw_list.add_text(leftX - 20, head_pos[1] - 5, color, f"HP: {entity_hp}")
         except:
             continue
 
@@ -262,7 +261,7 @@ def main():
             
         imgui.end()
 
-        # СТРОГО БЕЗ ИМЕНИ АДМИНА: Название окна изменено на VibeCoder Non-Admin HUD
+        # GUI-панель (Без упоминаний админа/UAC)
         imgui.set_next_window_position(10, 10)
         imgui.set_next_window_size(330, 190)
         imgui.begin("VibeCoder Non-Admin HUD", flags=imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_COLLAPSE)
