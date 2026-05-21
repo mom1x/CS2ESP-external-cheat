@@ -23,7 +23,7 @@ WINDOW_HEIGHT = win32api.GetSystemMetrics(1)
 # Смещения памяти
 dwEntityList, dwLocalPlayerPawn, dwViewMatrix = None, None, None
 m_iTeamNum, m_lifeState, m_pGameSceneNode = None, None, None
-m_modelState, m_hPlayerPawn, m_iHealth, m_vecOrigin = None, None, None, None # Добавлен m_vecOrigin
+m_modelState, m_hPlayerPawn, m_iHealth, m_vecOrigin = None, None, None, None 
 
 pm = None
 client = None
@@ -63,7 +63,6 @@ def load_local_offsets():
         m_hPlayerPawn = client_dll_data['client.dll']['classes']['CCSPlayerController']['fields']['m_hPlayerPawn']
         m_iHealth = client_dll_data['client.dll']['classes']['C_BaseEntity']['fields']['m_iHealth']
         
-        # ИСПРАВЛЕНО: Теперь оффсет вектора позиции корректно подтягивается из JSON
         m_vecOrigin = client_dll_data['client.dll']['classes']['CGameSceneNode']['fields']['m_vecOrigin']
 
         config_status = "Offsets loaded successfully!"
@@ -118,12 +117,14 @@ def esp(draw_list):
             entity_controller = pm.read_longlong(list_entry + 120 * (i & 0x1FF))
             if not entity_controller: continue
 
-            stats["checked"] += 1
-
             entity_controller_pawn = pm.read_int(entity_controller + m_hPlayerPawn)
             if not entity_controller_pawn: continue
 
-            list_entry2 = pm.read_longlong(entity + (0x8 * ((entity_controller_pawn & 0x7FFF) >> 9) + 16))
+            # СТАБИЛИЗАЦИЯ: Считаем только подтвержденные контроллеры игроков, чтобы счётчик не прыгал
+            stats["checked"] += 1
+
+            # ИСПРАВЛЕНО: Заменена маска с 0x7FFF на 0x1FFF для точного поиска Pawn в Source 2
+            list_entry2 = pm.read_longlong(entity + (0x8 * ((entity_controller_pawn & 0x1FFF) >> 9) + 16))
             if not list_entry2: continue
 
             entity_pawn = pm.read_longlong(list_entry2 + 120 * (entity_controller_pawn & 0x1FF))
@@ -139,20 +140,15 @@ def esp(draw_list):
             game_scene = pm.read_longlong(entity_pawn + m_pGameSceneNode)
             if not game_scene: continue
 
-            # =========================================================================
-            # 🔥 БУЛЕНЕПРОБИВАЕМЫЙ ДВУХУРОВНЕВЫЙ РАСЧЕТ КООРДИНАТ (БАЗА + КОСТИ)
-            # =========================================================================
-            
-            # Шаг 1: Читаем железобетонный Origin игрока из GameSceneNode (База — ноги)
+            # Читаем Origin игрока (База — ноги)
             feetX = pm.read_float(game_scene + m_vecOrigin)
             feetY = pm.read_float(game_scene + m_vecOrigin + 0x4)
             feetZ = pm.read_float(game_scene + m_vecOrigin + 0x8)
             
-            # По умолчанию выставляем расчетную высоту головы (рост игрока ~68 единиц)
             headX, headY, headZ = feetX, feetY, feetZ + 68.0
             legZ = feetZ
 
-            # Шаг 2: Пробуем считать точные кости скелета. Если упадет — останемся на базе!
+            # Пробуем считать точные кости скелета
             try:
                 bone_matrix = pm.read_longlong(game_scene + m_modelState + 0x80)
                 if bone_matrix:
@@ -161,12 +157,11 @@ def esp(draw_list):
                     b_headZ = pm.read_float(bone_matrix + 6 * 0x20 + 0x8)
                     b_legZ = pm.read_float(bone_matrix + 28 * 0x20 + 0x8)
                     
-                    # Проверяем, что кости вернули не нулевой мусор
                     if b_headX != 0.0 and b_headY != 0.0:
                         headX, headY, headZ = b_headX, b_headY, b_headZ + 6.0
                         legZ = b_legZ
             except:
-                pass # Кости отвалились? Не страшно, сработает дефолтный Origin!
+                pass 
 
             # Проекция на экран
             head_pos = w2s(view_matrix, headX, headY, headZ, WINDOW_WIDTH, WINDOW_HEIGHT)
@@ -175,19 +170,17 @@ def esp(draw_list):
             if head_pos[0] == -999 or leg_pos[0] == -999: continue
             stats["on_screen"] += 1
 
-            # Отрезаем рамку ESP
+            # Рендеринг ESP рамок
             color = imgui.get_color_u32_rgba(1, 0.2, 0.2, 1) # Яркий Красный
             delta = abs(head_pos[1] - leg_pos[1])
             leftX = head_pos[0] - delta // 3.5
             rightX = head_pos[0] + delta // 3.5
 
-            # Отрисовка бокса
             draw_list.add_line(leftX,  leg_pos[1],  rightX, leg_pos[1],  color, 1.5)
             draw_list.add_line(leftX,  leg_pos[1],  leftX,  head_pos[1], color, 1.5)
             draw_list.add_line(rightX, leg_pos[1],  rightX, head_pos[1], color, 1.5)
             draw_list.add_line(leftX,  head_pos[1], rightX, head_pos[1], color, 1.5)
 
-            # Текст здоровья
             draw_list.add_text(leftX - 18, head_pos[1] - 5, color, f"{entity_hp}")
         except:
             continue
@@ -262,10 +255,10 @@ def main():
             
         imgui.end()
 
-        # Расширенный HUD Панели управления для точной отладки
+        # СТРОГО БЕЗ ИМЕНИ АДМИНА: Название изменено на VibeCoder Non-Admin HUD
         imgui.set_next_window_position(10, 10)
         imgui.set_next_window_size(330, 190)
-        imgui.begin("VibeCoder Master HUD", flags=imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_COLLAPSE)
+        imgui.begin("VibeCoder Non-Admin HUD", flags=imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_COLLAPSE)
         imgui.text(f"Offsets: {config_status}")
         imgui.text(f"Game Status: {game_status}")
         imgui.text(f"Diagnostic: {loop_status}")
