@@ -38,7 +38,6 @@ BONE_CONNECTIONS = [
 ]
 
 def apply_blood_theme():
-    """Кастомный черно-красный стиль Blood HUD"""
     style = imgui.get_style()
     style.window_rounding = 6.0
     style.frame_rounding = 4.0
@@ -127,129 +126,141 @@ def esp(draw_list):
         lx, ly, lz = struct.unpack('fff', l_bytes)
     except: return
 
-    # Ищем индекс локального игрока с исправленной математикой чанков
+    # Оптимизированный поиск локального индекса по чанкам
     local_idx = -1
     if dwLocalPlayerController:
         try:
             local_ctrl = pm.read_longlong(client + dwLocalPlayerController)
-            for idx in range(1, 512):
-                list_idx = 8 * ((idx & 0x7FFF) >> 9) + 16 # FIX: Правильный приоритет операторов
-                le = pm.read_longlong(entity_list + list_idx)
-                if le and pm.read_longlong(le + 112 * (idx & 0x1FF)) == local_ctrl:
-                    local_idx = idx
-                    break
+            for chunk in range(4):
+                le = pm.read_longlong(entity_list + 8 * chunk + 16)
+                if not le: continue
+                for slot in range(512):
+                    if pm.read_longlong(le + 112 * slot) == local_ctrl:
+                        local_idx = chunk * 512 + slot
+                        break
+                if local_idx != -1: break
         except: pass
 
-    # Сканируем до 512 сущностей (фикс для пабликов на 64+ слота)
-    for i in range(1, 512):
+    # Сверхбыстрое сканирование 4 чанков (до 2048 сущностей) с кешированием указателя чанка
+    for chunk in range(4):
         try:
-            list_entry = pm.read_longlong(entity_list + 8 * ((i & 0x7FFF) >> 9) + 16) # FIX: Исправлен расчёт смещения чанка
+            list_entry = pm.read_longlong(entity_list + 8 * chunk + 16)
             if not list_entry: continue
-            
-            controller = pm.read_longlong(list_entry + 112 * (i & 0x1FF))
-            if not controller: continue
+        except: continue
 
-            pawn_handle = pm.read_uint(controller + m_hPlayerPawn)
-            if not pawn_handle or pawn_handle == 0xFFFFFFFF: continue
+        for slot in range(512):
+            i = chunk * 512 + slot
+            if i == 0: continue 
 
-            list_entry2 = pm.read_longlong(entity_list + 8 * ((pawn_handle & 0x7FFF) >> 9) + 16)
-            if not list_entry2: continue
+            try:
+                controller = pm.read_longlong(list_entry + 112 * slot)
+                if not controller: continue
 
-            entity_pawn = pm.read_longlong(list_entry2 + 112 * (pawn_handle & 0x1FF))
-            if not entity_pawn or entity_pawn == local_pawn: continue
+                # Проверяем команду через устойчивый контроллер (2 - Т, 3 - СТ)
+                team = pm.read_int(controller + m_iTeamNum)
+                if team not in [2, 3] or team == local_team: continue
 
-            # ФИКС ФАНТОМОВ: Проверка команды (2 - T, 3 - CT). Исключаем спектаторов и багнутые энтити
-            team = pm.read_int(entity_pawn + m_iTeamNum)
-            if team not in [2, 3] or team == local_team: continue
+                pawn_handle = pm.read_uint(controller + m_hPlayerPawn)
+                if not pawn_handle or pawn_handle == 0xFFFFFFFF: continue
 
-            health = pm.read_int(entity_pawn + m_iHealth)
-            if health <= 0 or health > 100: continue
-
-            game_scene = pm.read_longlong(entity_pawn + m_pGameSceneNode)
-            if not game_scene: continue
-
-            f_bytes = pm.read_bytes(game_scene + m_vecOrigin, 12)
-            fx, fy, fz = struct.unpack('fff', f_bytes)
-            
-            # ФИКС ФАНТОМОВ: Игнорируем сущности, сброшенные в нулевые координаты карты
-            if fx == 0.0 and fy == 0.0 and fz == 0.0: continue
-
-            stats["enemies"] += 1
-
-            dx, dy, dz = fx - lx, fy - ly, fz - lz
-            distance_meters = int(math.sqrt(dx*dx + dy*dy + dz*dz) / 39.37)
-
-            is_spotted = False
-            if local_idx != -1 and m_entitySpottedState:
-                try:
-                    slot = local_idx - 1
-                    sb = entity_pawn + m_entitySpottedState
-                    mask = pm.read_uint(sb + 0xC + (slot // 32) * 4)
-                    is_spotted = (mask & (1 << (slot % 32))) != 0
-                except: pass
-
-            if is_spotted:
-                stats["visible"] += 1
-                color = imgui.get_color_u32_rgba(0.0, 1.0, 0.2, 0.95)   # ЯРКО-ЗЕЛЕНЫЙ (Виден/Можно убить)
-            else:
-                color = imgui.get_color_u32_rgba(0.55, 0.0, 0.0, 0.85)  # КРОВАВО-КРАСНЫЙ (За стеной)
-
-            head_screen = w2s(view_matrix, fx, fy, fz + 74.0)
-            leg_screen = w2s(view_matrix, fx, fy, fz)
-            if not head_screen or not leg_screen: continue
-
-            h_diff = abs(head_screen[1] - leg_screen[1])
-            w_diff = h_diff / 1.8
-            l_x, r_x = head_screen[0] - (w_diff / 2.0), head_screen[0] + (w_diff / 2.0)
-
-            # Рендер элементов HUD
-            draw_list.add_rect(l_x, head_screen[1], r_x, leg_screen[1], color, rounding=1.0, thickness=1.5)
-            draw_list.add_line(SCREEN_CENTER_X, WINDOW_HEIGHT, leg_screen[0], leg_screen[1], color, 1.0)
-
-            # Вертикальный ХП-Бар
-            bar_x = l_x - 6
-            bar_top = head_screen[1]
-            bar_bottom = leg_screen[1]
-            bar_height = bar_bottom - bar_top
-            
-            draw_list.add_rect_filled(bar_x - 1, bar_top, bar_x + 2, bar_bottom, imgui.get_color_u32_rgba(0.02, 0.02, 0.02, 0.6))
-            health_perc = max(0, min(100, health)) / 100.0
-            hp_bar_top = bar_bottom - (bar_height * health_perc)
-            
-            hp_color = imgui.get_color_u32_rgba(0.3 + (health_perc * 0.7), 0.1 * health_perc, 0.1 * health_perc, 1.0)
-            draw_list.add_rect_filled(bar_x - 1, hp_bar_top, bar_x + 2, bar_bottom, hp_color)
-
-            draw_list.add_text(l_x, leg_screen[1] + 2, imgui.get_color_u32_rgba(0.9, 0.9, 0.9, 1.0), f"{distance_meters}m")
-
-            # Рендеринг скелета
-            skeleton_address = game_scene + m_modelState
-            bone_array = pm.read_longlong(skeleton_address + 0x80)
-            
-            if bone_array:
-                bone_positions_2d = {}
-                unique_bones = set([6] + [b for conn in BONE_CONNECTIONS for b in conn])
+                # Поиск Павна через хэндл контроллера
+                pawn_chunk = (pawn_handle & 0x7FFF) >> 9
+                pawn_slot = pawn_handle & 0x1FF
                 
-                for bone_id in unique_bones:
-                    b_pos_3d = get_bone_position(pm, bone_array, bone_id)
-                    if b_pos_3d:
-                        b_pos_2d = w2s(view_matrix, b_pos_3d[0], b_pos_3d[1], b_pos_3d[2])
-                        if b_pos_2d:
-                            bone_positions_2d[bone_id] = b_pos_2d
+                list_entry2 = pm.read_longlong(entity_list + 8 * pawn_chunk + 16)
+                if not list_entry2: continue
 
-                bone_color = imgui.get_color_u32_rgba(0.9, 0.9, 0.9, 0.75)
-                for connection in BONE_CONNECTIONS:
-                    if connection[0] in bone_positions_2d and connection[1] in bone_positions_2d:
-                        p1 = bone_positions_2d[connection[0]]
-                        p2 = bone_positions_2d[connection[1]]
-                        if math.hypot(p1[0]-p2[0], p1[1]-p2[1]) < h_diff * 1.5:
-                            draw_list.add_line(p1[0], p1[1], p2[0], p2[1], bone_color, 1.3)
+                entity_pawn = pm.read_longlong(list_entry2 + 112 * pawn_slot)
+                if not entity_pawn or entity_pawn == local_pawn: continue
 
-                if 6 in bone_positions_2d:
-                    head_2d = bone_positions_2d[6]
-                    dynamic_radius = max(2.5, h_diff / 12.0)
-                    draw_list.add_circle(head_2d[0], head_2d[1], dynamic_radius, color, num_segments=18, thickness=1.5)
-        except:
-            continue
+                # ФИКС ЗДОРОВЬЯ: Повышено до 200 ради корректной обработки VIP-баффов пабликов
+                health = pm.read_int(entity_pawn + m_iHealth)
+                if health <= 0 or health > 200: continue
+
+                game_scene = pm.read_longlong(entity_pawn + m_pGameSceneNode)
+                if not game_scene: continue
+
+                f_bytes = pm.read_bytes(game_scene + m_vecOrigin, 12)
+                fx, fy, fz = struct.unpack('fff', f_bytes)
+                if fx == 0.0 and fy == 0.0 and fz == 0.0: continue
+
+                stats["enemies"] += 1
+
+                dx, dy, dz = fx - lx, fy - ly, fz - lz
+                distance_meters = int(math.sqrt(dx*dx + dy*dy + dz*dz) / 39.37)
+
+                is_spotted = False
+                if local_idx != -1 and m_entitySpottedState:
+                    try:
+                        slot_idx = local_idx - 1
+                        sb = entity_pawn + m_entitySpottedState
+                        mask = pm.read_uint(sb + 0xC + (slot_idx // 32) * 4)
+                        is_spotted = (mask & (1 << (slot_idx % 32))) != 0
+                    except: pass
+
+                if is_spotted:
+                    stats["visible"] += 1
+                    color = imgui.get_color_u32_rgba(0.0, 1.0, 0.2, 0.95)   
+                else:
+                    color = imgui.get_color_u32_rgba(0.55, 0.0, 0.0, 0.85)  
+
+                head_screen = w2s(view_matrix, fx, fy, fz + 74.0)
+                leg_screen = w2s(view_matrix, fx, fy, fz)
+                if not head_screen or not leg_screen: continue
+
+                h_diff = abs(head_screen[1] - leg_screen[1])
+                w_diff = h_diff / 1.8
+                l_x, r_x = head_screen[0] - (w_diff / 2.0), head_screen[0] + (w_diff / 2.0)
+
+                # Отрисовка Бокса и Трейсера
+                draw_list.add_rect(l_x, head_screen[1], r_x, leg_screen[1], color, rounding=1.0, thickness=1.5)
+                draw_list.add_line(SCREEN_CENTER_X, WINDOW_HEIGHT, leg_screen[0], leg_screen[1], color, 1.0)
+
+                # Вертикальный ХП-Бар
+                bar_x = l_x - 6
+                bar_top = head_screen[1]
+                bar_bottom = leg_screen[1]
+                bar_height = bar_bottom - bar_top
+                
+                draw_list.add_rect_filled(bar_x - 1, bar_top, bar_x + 2, bar_bottom, imgui.get_color_u32_rgba(0.02, 0.02, 0.02, 0.6))
+                health_perc = max(0, min(100, health)) / 100.0
+                hp_bar_top = bar_bottom - (bar_height * health_perc)
+                
+                hp_color = imgui.get_color_u32_rgba(0.3 + (health_perc * 0.7), 0.1 * health_perc, 0.1 * health_perc, 1.0)
+                draw_list.add_rect_filled(bar_x - 1, hp_bar_top, bar_x + 2, bar_bottom, hp_color)
+
+                # Расстояние
+                draw_list.add_text(l_x, leg_screen[1] + 2, imgui.get_color_u32_rgba(0.9, 0.9, 0.9, 1.0), f"{distance_meters}m")
+
+                # Рендеринг скелета
+                skeleton_address = game_scene + m_modelState
+                bone_array = pm.read_longlong(skeleton_address + 0x80)
+                
+                if bone_array:
+                    bone_positions_2d = {}
+                    unique_bones = set([6] + [b for conn in BONE_CONNECTIONS for b in conn])
+                    
+                    for bone_id in unique_bones:
+                        b_pos_3d = get_bone_position(pm, bone_array, bone_id)
+                        if b_pos_3d:
+                            b_pos_2d = w2s(view_matrix, b_pos_3d[0], b_pos_3d[1], b_pos_3d[2])
+                            if b_pos_2d:
+                                bone_positions_2d[bone_id] = b_pos_2d
+
+                    bone_color = imgui.get_color_u32_rgba(0.9, 0.9, 0.9, 0.75)
+                    for connection in BONE_CONNECTIONS:
+                        if connection[0] in bone_positions_2d and connection[1] in bone_positions_2d:
+                            p1 = bone_positions_2d[connection[0]]
+                            p2 = bone_positions_2d[connection[1]]
+                            if math.hypot(p1[0]-p2[0], p1[1]-p2[1]) < h_diff * 1.5:
+                                draw_list.add_line(p1[0], p1[1], p2[0], p2[1], bone_color, 1.3)
+
+                    if 6 in bone_positions_2d:
+                        head_2d = bone_positions_2d[6]
+                        dynamic_radius = max(2.5, h_diff / 12.0)
+                        draw_list.add_circle(head_2d[0], head_2d[1], dynamic_radius, color, num_segments=18, thickness=1.5)
+            except:
+                continue
 
 def try_connect_game():
     global pm, client, game_status
