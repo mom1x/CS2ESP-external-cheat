@@ -29,9 +29,8 @@ game_status = "WAITING CS2..."
 offsets_loaded = False
 stats = {"enemies": 0, "visible": 0}
 
-# Скелет: пары индексов костей для отрисовки линий
 BONE_CONNECTIONS = [
-    (6, 5), (5, 4), (4, 0),              # Позвоночник: Голова -> Шея -> Грудь -> Таз
+    (6, 5), (5, 4), (4, 0),              # Позвоночник
     (5, 8), (8, 9), (9, 11),            # Левая рука
     (5, 13), (13, 14), (14, 16),        # Правая рука
     (0, 22), (22, 23), (23, 24),        # Левая нога
@@ -41,18 +40,15 @@ BONE_CONNECTIONS = [
 def apply_blood_theme():
     """Кастомный черно-красный стиль Blood HUD"""
     style = imgui.get_style()
-    
     style.window_rounding = 6.0
     style.frame_rounding = 4.0
     style.scrollbar_rounding = 3.0
-    
     style.colors[imgui.COLOR_WINDOW_BACKGROUND] = [0.03, 0.02, 0.02, 0.88] 
     style.colors[imgui.COLOR_BORDER] = [0.55, 0.0, 0.0, 0.7]              
     style.colors[imgui.COLOR_TITLE_BACKGROUND] = [0.35, 0.0, 0.0, 0.8]     
     style.colors[imgui.COLOR_TITLE_BACKGROUND_ACTIVE] = [0.65, 0.0, 0.0, 0.95] 
     style.colors[imgui.COLOR_TEXT] = [0.92, 0.92, 0.92, 1.0]              
     style.colors[imgui.COLOR_SEPARATOR] = [0.45, 0.0, 0.0, 0.6]           
-
 
 def load_local_offsets():
     global dwEntityList, dwLocalPlayerPawn, dwViewMatrix, dwLocalPlayerController
@@ -101,7 +97,6 @@ def w2s(mtx, posx, posy, posz):
     return None
 
 def get_bone_position(pm, bone_array, bone_index):
-    """Высокоскоростное чтение позиции кости блоком байт"""
     try:
         bone_address = bone_array + (bone_index * 32)
         b_bytes = pm.read_bytes(bone_address, 12)
@@ -117,7 +112,6 @@ def esp(draw_list):
     stats = {"enemies": 0, "visible": 0}
 
     try:
-        # Оптимизация: Считывание матрицы 4х4 в один заход
         v_buff = pm.read_bytes(client + dwViewMatrix, 64)
         view_matrix = struct.unpack('16f', v_buff)
 
@@ -133,46 +127,54 @@ def esp(draw_list):
         lx, ly, lz = struct.unpack('fff', l_bytes)
     except: return
 
+    # Ищем индекс локального игрока с исправленной математикой чанков
     local_idx = -1
     if dwLocalPlayerController:
         try:
             local_ctrl = pm.read_longlong(client + dwLocalPlayerController)
-            for idx in range(1, 256):
-                le = pm.read_longlong(entity_list + (((8 * (idx & 0x7FFF)) >> 9) + 16))
+            for idx in range(1, 512):
+                list_idx = 8 * ((idx & 0x7FFF) >> 9) + 16 # FIX: Правильный приоритет операторов
+                le = pm.read_longlong(entity_list + list_idx)
                 if le and pm.read_longlong(le + 112 * (idx & 0x1FF)) == local_ctrl:
                     local_idx = idx
                     break
         except: pass
 
-    # Сканирование 256 слотов под паблик-серверы
-    for i in range(1, 256):
+    # Сканируем до 512 сущностей (фикс для пабликов на 64+ слота)
+    for i in range(1, 512):
         try:
-            list_entry = pm.read_longlong(entity_list + ((8 * (i & 0x7FFF)) >> 9) + 16)
+            list_entry = pm.read_longlong(entity_list + 8 * ((i & 0x7FFF) >> 9) + 16) # FIX: Исправлен расчёт смещения чанка
             if not list_entry: continue
+            
             controller = pm.read_longlong(list_entry + 112 * (i & 0x1FF))
             if not controller: continue
 
             pawn_handle = pm.read_uint(controller + m_hPlayerPawn)
-            if not pawn_handle: continue
+            if not pawn_handle or pawn_handle == 0xFFFFFFFF: continue
 
-            list_entry2 = pm.read_longlong(entity_list + (8 * ((pawn_handle & 0x7FFF) >> 9) + 16))
+            list_entry2 = pm.read_longlong(entity_list + 8 * ((pawn_handle & 0x7FFF) >> 9) + 16)
             if not list_entry2: continue
 
             entity_pawn = pm.read_longlong(list_entry2 + 112 * (pawn_handle & 0x1FF))
             if not entity_pawn or entity_pawn == local_pawn: continue
 
+            # ФИКС ФАНТОМОВ: Проверка команды (2 - T, 3 - CT). Исключаем спектаторов и багнутые энтити
+            team = pm.read_int(entity_pawn + m_iTeamNum)
+            if team not in [2, 3] or team == local_team: continue
+
             health = pm.read_int(entity_pawn + m_iHealth)
             if health <= 0 or health > 100: continue
-
-            team = pm.read_int(entity_pawn + m_iTeamNum)
-            if team == local_team: continue
-            stats["enemies"] += 1
 
             game_scene = pm.read_longlong(entity_pawn + m_pGameSceneNode)
             if not game_scene: continue
 
             f_bytes = pm.read_bytes(game_scene + m_vecOrigin, 12)
             fx, fy, fz = struct.unpack('fff', f_bytes)
+            
+            # ФИКС ФАНТОМОВ: Игнорируем сущности, сброшенные в нулевые координаты карты
+            if fx == 0.0 and fy == 0.0 and fz == 0.0: continue
+
+            stats["enemies"] += 1
 
             dx, dy, dz = fx - lx, fy - ly, fz - lz
             distance_meters = int(math.sqrt(dx*dx + dy*dy + dz*dz) / 39.37)
@@ -186,12 +188,11 @@ def esp(draw_list):
                     is_spotted = (mask & (1 << (slot % 32))) != 0
                 except: pass
 
-            # Динамическая смена цвета: Зеленый если можно убить (виден), Красный если скрыт
             if is_spotted:
                 stats["visible"] += 1
-                color = imgui.get_color_u32_rgba(0.0, 1.0, 0.2, 0.95)   # ЯРКО-ЗЕЛЕНЫЙ
+                color = imgui.get_color_u32_rgba(0.0, 1.0, 0.2, 0.95)   # ЯРКО-ЗЕЛЕНЫЙ (Виден/Можно убить)
             else:
-                color = imgui.get_color_u32_rgba(0.55, 0.0, 0.0, 0.85)  # КРОВАВО-КРАСНЫЙ
+                color = imgui.get_color_u32_rgba(0.55, 0.0, 0.0, 0.85)  # КРОВАВО-КРАСНЫЙ (За стеной)
 
             head_screen = w2s(view_matrix, fx, fy, fz + 74.0)
             leg_screen = w2s(view_matrix, fx, fy, fz)
@@ -201,13 +202,11 @@ def esp(draw_list):
             w_diff = h_diff / 1.8
             l_x, r_x = head_screen[0] - (w_diff / 2.0), head_screen[0] + (w_diff / 2.0)
 
-            # Отрисовка Бокса
+            # Рендер элементов HUD
             draw_list.add_rect(l_x, head_screen[1], r_x, leg_screen[1], color, rounding=1.0, thickness=1.5)
-
-            # Трейсеры до ног противника
             draw_list.add_line(SCREEN_CENTER_X, WINDOW_HEIGHT, leg_screen[0], leg_screen[1], color, 1.0)
 
-            # Вертикальный ХП-Бар без текста
+            # Вертикальный ХП-Бар
             bar_x = l_x - 6
             bar_top = head_screen[1]
             bar_bottom = leg_screen[1]
@@ -220,7 +219,6 @@ def esp(draw_list):
             hp_color = imgui.get_color_u32_rgba(0.3 + (health_perc * 0.7), 0.1 * health_perc, 0.1 * health_perc, 1.0)
             draw_list.add_rect_filled(bar_x - 1, hp_bar_top, bar_x + 2, bar_bottom, hp_color)
 
-            # Дистанция в метрах
             draw_list.add_text(l_x, leg_screen[1] + 2, imgui.get_color_u32_rgba(0.9, 0.9, 0.9, 1.0), f"{distance_meters}m")
 
             # Рендеринг скелета
@@ -246,7 +244,6 @@ def esp(draw_list):
                         if math.hypot(p1[0]-p2[0], p1[1]-p2[1]) < h_diff * 1.5:
                             draw_list.add_line(p1[0], p1[1], p2[0], p2[1], bone_color, 1.3)
 
-                # Круг на голову
                 if 6 in bone_positions_2d:
                     head_2d = bone_positions_2d[6]
                     dynamic_radius = max(2.5, h_diff / 12.0)
@@ -314,7 +311,7 @@ def main():
         if offsets_loaded and pm: esp(imgui.get_window_draw_list())
         imgui.end()
 
-        # Меню в стиле Blood
+        # Статистическое меню
         imgui.set_next_window_position(25, 25)
         imgui.set_next_window_size(240, 115)
         imgui.begin("BLOOD // EXTERNAL", flags=imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_COLLAPSE)
