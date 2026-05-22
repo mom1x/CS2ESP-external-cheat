@@ -23,6 +23,8 @@ SCREEN_CENTER_Y = WINDOW_HEIGHT / 2
 dwEntityList, dwLocalPlayerPawn, dwViewMatrix, dwLocalPlayerController, dwViewAngles = None, None, None, None, None
 m_iTeamNum, m_hPlayerPawn, m_iHealth, m_vecOrigin, m_pGameSceneNode = None, None, None, None, None
 m_modelState, m_entitySpottedState, m_vecViewOffset = None, None, None
+# Смещения для системы наблюдателей
+m_pObserverServices, m_hObserverTarget, m_sSanitizedPlayerName = None, None, None
 
 pm = None
 client = None
@@ -30,20 +32,22 @@ config_status = "STABLE"
 game_status = "WAITING CS2..."
 offsets_loaded = False
 stats = {"enemies": 0, "visible": 0}
+spectators_list = []
 local_idx_global = -1
 
 menu_open = True            
 cfg_show_hud_stats = True   
 
 # Настройки систем
+cfg_esp_enabled = True      # Глобальный переключатель ВХ (F8)
 cfg_esp_box = True
 cfg_esp_skeleton = True
 cfg_esp_tracers = False
 cfg_aim_enabled = True
 cfg_aim_ignore_visibility = True  
-cfg_aim_fov = 15.0        # Радиус FOV в градусах
-cfg_aim_smooth = 4.0      # Плавность (чем меньше, тем быстрее и жестче липнет)
-cfg_aim_bone = 6          # 6 - Голова, 5 - Шея, 4 - Грудь
+cfg_aim_fov = 15.0        
+cfg_aim_smooth = 4.0      
+cfg_aim_bone = 6          
 
 BONE_CONNECTIONS = [
     (6, 5), (5, 4), (4, 0),              
@@ -63,7 +67,7 @@ def apply_blood_theme():
     style.colors[imgui.COLOR_TITLE_BACKGROUND] = [0.38, 0.0, 0.0, 0.85]     
     style.colors[imgui.COLOR_TITLE_BACKGROUND_ACTIVE] = [0.7, 0.0, 0.0, 1.0] 
     style.colors[imgui.COLOR_TEXT] = [0.95, 0.95, 0.95, 1.0]              
-    style.colors[imgui.COLOR_SEPARATOR] = [0.5, 0.0, 0.0, 0.6]           
+    style.colors[imgui.COLOR_SEPARATOR] = [0.5, 0.0, 0.0, 0.6]            
     style.colors[imgui.COLOR_FRAME_BACKGROUND] = [0.12, 0.05, 0.05, 0.8]
     style.colors[imgui.COLOR_FRAME_BACKGROUND_HOVERED] = [0.25, 0.05, 0.05, 0.9]
     style.colors[imgui.COLOR_FRAME_BACKGROUND_ACTIVE] = [0.4, 0.05, 0.05, 1.0]
@@ -86,8 +90,9 @@ def force_focus_game():
 
 def load_local_offsets():
     global dwEntityList, dwLocalPlayerPawn, dwViewMatrix, dwLocalPlayerController, dwViewAngles
-    global m_iTeamNum, m_hPlayerPawn, m_iHealth, m_vecOrigin, m_pGameSceneNode
-    global m_modelState, m_entitySpottedState, m_vecViewOffset, config_status, offsets_loaded
+    global m_iTeamNum, m_hPlayerPawn, m_iHealth, m_pGameSceneNode, m_vecOrigin, m_vecViewOffset
+    global m_modelState, m_entitySpottedState, config_status, offsets_loaded
+    global m_pObserverServices, m_hObserverTarget, m_sSanitizedPlayerName
 
     offsets_path = os.path.join("offsets", "offsets.json")
     client_dll_path = os.path.join("offsets", "client_dll.json")
@@ -118,6 +123,10 @@ def load_local_offsets():
         
         m_modelState = dw_classes['CSkeletonInstance']['fields']['m_modelState']
         m_entitySpottedState = dw_classes.get('C_CSPlayerPawn', {}).get('fields', {}).get('m_entitySpottedState', None)
+        
+        m_pObserverServices = dw_classes.get('C_BasePlayerPawn', {}).get('fields', {}).get('m_pObserverServices', None)
+        m_hObserverTarget = dw_classes.get('C_PlayerObserverServices', {}).get('fields', {}).get('m_hObserverTarget', None)
+        m_sSanitizedPlayerName = dw_classes.get('CCSPlayerController', {}).get('fields', {}).get('m_sSanitizedPlayerName', None)
 
         config_status = "MULTIHACK CFG LOADED"
         offsets_loaded = True
@@ -141,17 +150,15 @@ def get_bone_position(pm, bone_array, bone_index):
         return [bx, by, bz]
     except: return None
 
-# --- ВЫСОКОСКОРОСТНОЙ СВЕРХТОЧНЫЙ МЫШЕЧНЫЙ АИМБОТ ---
 def async_aimbot_processor():
     global pm, client, offsets_loaded, cfg_aim_enabled, cfg_aim_fov, cfg_aim_smooth, cfg_aim_bone, cfg_aim_ignore_visibility, local_idx_global
     
     while True:
-        time.sleep(0.001)  # Частота опроса 1000 Гц
+        time.sleep(0.001)  
         
         if not pm or not offsets_loaded or not cfg_aim_enabled:
             continue
             
-        # Активация аима строго при удержании ЛКМ (0x01)
         if (win32api.GetAsyncKeyState(0x01) & 0x8000) == 0:
             continue
             
@@ -166,14 +173,12 @@ def async_aimbot_processor():
             entity_list = pm.read_longlong(client + dwEntityList)
             if not entity_list: continue
             
-            # Перевод FOV из градусов в пиксели экрана
             fov_pixels = (cfg_aim_fov * WINDOW_WIDTH) / 180.0
             
             best_target_dx = None
             best_target_dy = None
             min_screen_dist = fov_pixels
             
-            # Оптимизация: Игроки всегда находятся в первом чанке (слоты 1-64)
             list_entry = pm.read_longlong(entity_list + 16) 
             if not list_entry: continue
             
@@ -200,7 +205,6 @@ def async_aimbot_processor():
                     health = pm.read_int(entity_pawn + m_iHealth)
                     if health <= 0 or health > 200: continue
                     
-                    # Проверка видимости
                     if not cfg_aim_ignore_visibility and local_idx_global != -1 and m_entitySpottedState:
                         try:
                             slot_idx = local_idx_global - 1
@@ -218,7 +222,6 @@ def async_aimbot_processor():
                     if bone_pos3d:
                         bone_screen = w2s(view_matrix, bone_pos3d[0], bone_pos3d[1], bone_pos3d[2])
                         if bone_screen:
-                            # Считаем смещение от центра прицела в пикселях
                             dx = bone_screen[0] - SCREEN_CENTER_X
                             dy = bone_screen[1] - SCREEN_CENTER_Y
                             dist = math.hypot(dx, dy)
@@ -229,55 +232,81 @@ def async_aimbot_processor():
                                 best_target_dy = dy
                 except: continue
                 
-            # Если цель найдена внутри круга FOV — плавно смещаем мышь ОС Windows
             if best_target_dx is not None and best_target_dy is not None:
                 move_x = best_target_dx / max(1.0, cfg_aim_smooth)
                 move_y = best_target_dy / max(1.0, cfg_aim_smooth)
-                
-                # Симуляция аппаратного перемещения мыши
                 win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, int(move_x), int(move_y), 0, 0)
         except: pass
 
 def process_visuals_and_sync(draw_list):
-    global stats, local_idx_global
+    global stats, local_idx_global, spectators_list, cfg_esp_enabled
     if not pm or not offsets_loaded: return
     
     current_stats = {"enemies": 0, "visible": 0}
+    current_spectators = []
     
     try:
         v_buff = pm.read_bytes(client + dwViewMatrix, 64)
         view_matrix = struct.unpack('16f', v_buff)
         local_pawn = pm.read_longlong(client + dwLocalPlayerPawn)
         if not local_pawn: return
+        
         local_team = pm.read_int(local_pawn + m_iTeamNum)
         entity_list = pm.read_longlong(client + dwEntityList)
         if not entity_list: return
         
+        local_pawn_handle = 0
         if dwLocalPlayerController:
             local_ctrl = pm.read_longlong(client + dwLocalPlayerController)
-            list_entry_local = pm.read_longlong(entity_list + 16)
-            if list_entry_local:
-                for slot in range(64):
-                    if pm.read_longlong(list_entry_local + 112 * slot) == local_ctrl:
-                        local_idx_global = slot
-                        break
+            if local_ctrl:
+                local_pawn_handle = pm.read_uint(local_ctrl + m_hPlayerPawn)
 
         list_entry = pm.read_longlong(entity_list + 16)
         if list_entry:
-            for slot in range(1, 64):
+            # Расширяем до 128 слотов, чтобы детектить админов в глубоком спектре паблика
+            for slot in range(1, 128):
                 try:
+                    pawn_chunk = (slot & 0x7FFF) >> 9
+                    pawn_slot = slot & 0x1FF
+                    list_entry2 = pm.read_longlong(entity_list + 8 * pawn_chunk + 16)
+                    if not list_entry2: continue
+                    
+                    entity_pawn = pm.read_longlong(list_entry2 + 112 * pawn_slot)
+                    if not entity_pawn: continue
+
+                    # Поиск контроллера для этой сущности, чтобы забрать никнейм
                     controller = pm.read_longlong(list_entry + 112 * slot)
+
+                    # --- УЛУЧШЕННЫЙ ДЕТЕКТ НАБЛЮДАТЕЛЕЙ ---
+                    if local_pawn_handle and m_pObserverServices and m_hObserverTarget:
+                        try:
+                            obs_services = pm.read_longlong(entity_pawn + m_pObserverServices)
+                            if obs_services:
+                                target_handle = pm.read_uint(obs_services + m_hObserverTarget)
+                                if target_handle == local_pawn_handle:
+                                    s_name = "Unknown Spec"
+                                    if controller:
+                                        name_ptr = pm.read_longlong(controller + m_sSanitizedPlayerName)
+                                        if name_ptr:
+                                            name_bytes = pm.read_bytes(name_ptr, 32)
+                                            s_name = name_bytes.split(b'\x00')[0].decode('utf-8', errors='ignore')
+                                    if not controller or s_name == "Unknown Spec" or s_name == "":
+                                        s_name = f"Spectator ({slot})"
+                                        
+                                    if s_name not in current_spectators:
+                                        current_spectators.append(s_name)
+                        except: pass
+
+                    # Если глобальный тумблер ВХ выключен, отрисовку пропускаем, но спектаторов продолжаем собирать!
+                    if not cfg_esp_enabled:
+                        continue
+
+                    # Ограничение игрового цикла для отрисовки ESP (стандартные 64 слота)
+                    if slot > 64: continue
                     if not controller: continue
+                    
                     team = pm.read_int(controller + m_iTeamNum)
                     if team not in [2, 3] or team == local_team: continue
-                    pawn_handle = pm.read_uint(controller + m_hPlayerPawn)
-                    if not pawn_handle or pawn_handle == 0xFFFFFFFF: continue
-                    
-                    pawn_chunk = (pawn_handle & 0x7FFF) >> 9
-                    pawn_slot = pawn_handle & 0x1FF
-                    list_entry2 = pm.read_longlong(entity_list + 8 * pawn_chunk + 16)
-                    entity_pawn = pm.read_longlong(list_entry2 + 112 * pawn_slot)
-                    if not entity_pawn or entity_pawn == local_pawn: continue
                     
                     health = pm.read_int(entity_pawn + m_iHealth)
                     if health <= 0 or health > 200: continue
@@ -335,7 +364,9 @@ def process_visuals_and_sync(draw_list):
                                 draw_list.add_circle(bone_positions_2d[6][0], bone_positions_2d[6][1], max(2.5, h_diff / 12.0), color, num_segments=16, thickness=1.5)
                 except: continue
     except: pass
-    stats = current_stats
+    if cfg_esp_enabled:
+        stats = current_stats
+    spectators_list = current_spectators
 
 def try_connect_game():
     global pm, client, game_status
@@ -356,8 +387,9 @@ def try_connect_game():
     return False
 
 def main():
-    global cfg_esp_box, cfg_esp_skeleton, cfg_esp_tracers
+    global cfg_esp_enabled, cfg_esp_box, cfg_esp_skeleton, cfg_esp_tracers
     global cfg_aim_enabled, cfg_aim_fov, cfg_aim_smooth, cfg_aim_bone, cfg_aim_ignore_visibility, menu_open, cfg_show_hud_stats
+    global local_idx_global, spectators_list
 
     if not glfw.init(): return
     glfw.window_hint(glfw.TRANSPARENT_FRAMEBUFFER, glfw.TRUE)
@@ -385,17 +417,18 @@ def main():
     impl = GlfwRenderer(window)
     load_local_offsets()
     
-    # Поток аимбота теперь крутится отдельно на mouse_event
     aim_thread = threading.Thread(target=async_aimbot_processor, daemon=True)
     aim_thread.start()
     
     last_check = 0
+    last_local_idx_check = 0
 
     while not glfw.window_should_close(window):
         glfw.poll_events()
         impl.process_inputs()
         imgui.new_frame()
         
+        # Переключение меню
         if win32api.GetAsyncKeyState(win32con.VK_F5) & 1:
             menu_open = not menu_open
             update_window_input_state(hwnd, menu_open)
@@ -408,15 +441,33 @@ def main():
         if win32api.GetAsyncKeyState(win32con.VK_F7) & 1:
             cfg_aim_enabled = not cfg_aim_enabled
 
+        # [НОВОЕ] F8 Переключатель ВХ
+        if win32api.GetAsyncKeyState(win32con.VK_F8) & 1:
+            cfg_esp_enabled = not cfg_esp_enabled
+
+        # Поиск игры
         if not pm and time.time() - last_check > 2.0:
             last_check = time.time()
             try_connect_game()
+
+        if pm and offsets_loaded and (time.time() - last_local_idx_check > 1.5):
+            last_local_idx_check = time.time()
+            try:
+                local_ctrl = pm.read_longlong(client + dwLocalPlayerController)
+                entity_list = pm.read_longlong(client + dwEntityList)
+                list_entry_local = pm.read_longlong(entity_list + 16)
+                if list_entry_local and local_ctrl:
+                    for slot in range(64):
+                        if pm.read_longlong(list_entry_local + 112 * slot) == local_ctrl:
+                            local_idx_global = slot
+                            break
+            except: pass
 
         imgui.set_next_window_size(WINDOW_WIDTH, WINDOW_HEIGHT)
         imgui.set_next_window_position(0, 0)
         imgui.begin("Canvas", flags=imgui.WINDOW_NO_TITLE_BAR | imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_BACKGROUND | imgui.WINDOW_NO_INPUTS)
         
-        imgui.get_window_draw_list().add_text(15, WINDOW_HEIGHT - 45, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 0.4), "[F5] Menu  |  [F6] HUD Widgets  |  [F7] Toggle Aim")
+        imgui.get_window_draw_list().add_text(15, WINDOW_HEIGHT - 45, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 0.4), "[F5] Menu  |  [F6] HUD Widgets  |  [F7] Toggle Aim  |  [F8] Toggle ESP")
         
         if offsets_loaded and pm: 
             process_visuals_and_sync(imgui.get_window_draw_list())
@@ -425,9 +476,11 @@ def main():
                 imgui.get_window_draw_list().add_circle(SCREEN_CENTER_X, SCREEN_CENTER_Y, fov_pixels, imgui.get_color_u32_rgba(0.6, 0.0, 0.0, 0.25), num_segments=48, thickness=1.2)
         imgui.end()
 
+        # Виджеты HUD
         if cfg_show_hud_stats:
+            # 1. Основной системный виджет справа
             imgui.set_next_window_position(WINDOW_WIDTH - 240, 30, condition=imgui.ALWAYS)
-            imgui.set_next_window_size(220, 130)
+            imgui.set_next_window_size(220, 150)
             imgui.begin("HUD_STATUS_PANEL", flags=imgui.WINDOW_NO_TITLE_BAR | imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_BACKGROUND | imgui.WINDOW_NO_INPUTS)
             
             dl = imgui.get_window_draw_list()
@@ -445,18 +498,43 @@ def main():
             imgui.same_line()
             imgui.text_colored(game_status, *g_color)
             
+            esp_stat_color = [0.0, 1.0, 0.2, 1.0] if cfg_esp_enabled else [0.8, 0.1, 0.1, 1.0]
+            imgui.text("Visuals (F8): ")
+            imgui.same_line()
+            imgui.text_colored("ACTIVE" if cfg_esp_enabled else "MUTED", *esp_stat_color)
+            
             a_color = [0.0, 1.0, 0.2, 1.0] if cfg_aim_enabled else [0.5, 0.5, 0.5, 1.0]
             imgui.text("Aimbot Logic: ")
             imgui.same_line()
             imgui.text_colored("MOUSE SIM" if cfg_aim_enabled else "MUTED", *a_color)
             
-            imgui.text(f"Targets Tracked: {stats['enemies']}")
-            imgui.text(f"Visible (Spotted): {stats['visible']}")
+            imgui.text(f"Targets Tracked: {stats['enemies'] if cfg_esp_enabled else 0}")
             imgui.end()
+
+            # 2. Виджет спектаторов справа под основным виджетом
+            if spectators_list:
+                imgui.set_next_window_position(WINDOW_WIDTH - 240, 195, condition=imgui.ALWAYS)
+                imgui.set_next_window_size(220, 35 + len(spectators_list) * 20)
+                imgui.begin("HUD_SPEC_PANEL", flags=imgui.WINDOW_NO_TITLE_BAR | imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_BACKGROUND | imgui.WINDOW_NO_INPUTS)
+                
+                sdl = imgui.get_window_draw_list()
+                spos = imgui.get_window_position()
+                ssize = imgui.get_window_size()
+                sdl.add_rect_filled(spos.x, spos.y, spos.x + ssize.x, spos.y + ssize.y, imgui.get_color_u32_rgba(0.04, 0.03, 0.03, 0.85), rounding=5.0)
+                sdl.add_rect(spos.x, spos.y, spos.x + ssize.x, spos.y + ssize.y, imgui.get_color_u32_rgba(0.8, 0.0, 0.0, 0.85), rounding=5.0, thickness=1.5)
+                
+                imgui.set_cursor_pos((12, 8))
+                imgui.text_colored("WATCHING YOU:", 1.0, 0.1, 0.1, 1.0)
+                imgui.separator()
+                
+                for spec_name in spectators_list:
+                    imgui.set_cursor_pos((12, imgui.get_cursor_pos().y + 2))
+                    imgui.text_colored(f"👁 {spec_name}", 0.95, 0.95, 0.95, 1.0)
+                imgui.end()
 
         if menu_open:
             imgui.set_next_window_position(60, 60, condition=imgui.FIRST_USE_EVER)
-            imgui.set_next_window_size(460, 320, condition=imgui.FIRST_USE_EVER)
+            imgui.set_next_window_size(460, 340, condition=imgui.FIRST_USE_EVER)
             imgui.begin("BLOODWARE // MULTIHACK V2", flags=imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_COLLAPSE)
             
             imgui.text(f"Status: {game_status} | Config: {config_status}")
@@ -465,6 +543,8 @@ def main():
             if imgui.begin_tab_bar("CheatTabs"):
                 if imgui.begin_tab_item("VISUALS")[0]:
                     imgui.spacing()
+                    _, cfg_esp_enabled = imgui.checkbox("Master ESP Toggle (F8)", cfg_esp_enabled)
+                    imgui.separator()
                     _, cfg_esp_box = imgui.checkbox("Enable 2D Box ESP", cfg_esp_box)
                     _, cfg_esp_skeleton = imgui.checkbox("Enable Skeleton Bones", cfg_esp_skeleton)
                     _, cfg_esp_tracers = imgui.checkbox("Enable Snaplines", cfg_esp_tracers)
