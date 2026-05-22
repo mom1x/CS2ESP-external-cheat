@@ -31,17 +31,17 @@ offsets_loaded = False
 stats = {"enemies": 0, "visible": 0}
 
 # Состояние меню
-menu_open = True  # По умолчанию открыто при старте
+menu_open = True  # Открыто при старте для настройки
 
 # Настройки конфигурации
 cfg_esp_box = True
 cfg_esp_skeleton = True
 cfg_esp_tracers = False
 cfg_aim_enabled = True
-cfg_aim_ignore_visibility = True  # По умолчанию ВКЛ для идеальной работы с ботами
+cfg_aim_ignore_visibility = True  
 cfg_aim_fov = 15.0
 cfg_aim_smooth = 4.5
-cfg_aim_bone = 6  # 6 - Голова
+cfg_aim_bone = 6  
 
 BONE_CONNECTIONS = [
     (6, 5), (5, 4), (4, 0),              
@@ -69,13 +69,23 @@ def apply_blood_theme():
     style.colors[imgui.COLOR_SLIDER_GRAB_ACTIVE] = [0.9, 0.0, 0.0, 1.0]
 
 def update_window_input_state(hwnd, is_clickable):
-    """Динамически переключает кликабельность оверлея"""
+    """Переключает сквозной клик для Windows API"""
     style = win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
     if is_clickable:
-        style &= ~win32con.WS_EX_TRANSPARENT  # Убираем прозрачность для кликов
+        style &= ~win32con.WS_EX_TRANSPARENT  # Чит ловит мышку
     else:
-        style |= win32con.WS_EX_TRANSPARENT   # Делаем сквозным
+        style |= win32con.WS_EX_TRANSPARENT   # Клики летят сквозь чит в игру
     win32gui.SetWindowLong(hwnd, win32con.GWL_EXSTYLE, style)
+
+def force_focus_game():
+    """Принудительно возвращает управление в CS2"""
+    hwnd_cs2 = win32gui.FindWindow(None, "Counter-Strike 2")
+    if hwnd_cs2:
+        try:
+            # Активируем окно игры, чтобы убрать курсор из оверлея
+            win32gui.SetForegroundWindow(hwnd_cs2)
+        except:
+            pass
 
 def load_local_offsets():
     global dwEntityList, dwLocalPlayerPawn, dwViewMatrix, dwLocalPlayerController, dwViewAngles
@@ -187,7 +197,7 @@ def process_features(draw_list):
                 if local_idx != -1: break
         except: pass
 
-    # Сбор данных игроков
+    # Просчет игроков
     for chunk in range(4):
         try:
             list_entry = pm.read_longlong(entity_list + 8 * chunk + 16)
@@ -227,7 +237,6 @@ def process_features(draw_list):
 
                 stats["enemies"] += 1
 
-                # Проверка видимости
                 is_spotted = False
                 if local_idx != -1 and m_entitySpottedState:
                     try:
@@ -245,9 +254,7 @@ def process_features(draw_list):
 
                 aim_bone_pos3d = get_bone_position(pm, bone_array, cfg_aim_bone)
                 
-                # Логика выбора цели аимботом
                 if aim_bone_pos3d and cfg_aim_enabled:
-                    # Если включен игнор видимости ИЛИ игрок реально виден
                     if cfg_aim_ignore_visibility or is_spotted:
                         current_pitch = pm.read_float(client + dwViewAngles)
                         current_yaw = pm.read_float(client + dwViewAngles + 4)
@@ -269,7 +276,7 @@ def process_features(draw_list):
                             min_fov_delta = calculated_fov
                             best_target_angles = (target_pitch, target_yaw)
 
-                # --- РЕНДЕРИНГ VISUALS ---
+                # --- ОТРИСОВКА ESP (Показывает всегда, когда запущен чит) ---
                 color = imgui.get_color_u32_rgba(0.0, 1.0, 0.2, 0.95) if is_spotted else imgui.get_color_u32_rgba(0.55, 0.0, 0.0, 0.85)
 
                 head_screen = w2s(view_matrix, fx, fy, fz + 73.0)
@@ -285,7 +292,7 @@ def process_features(draw_list):
                 if cfg_esp_tracers:
                     draw_list.add_line(SCREEN_CENTER_X, WINDOW_HEIGHT, leg_screen[0], leg_screen[1], color, 1.0)
 
-                # ХП
+                # HP Bar
                 bar_x = l_x - 6
                 draw_list.add_rect_filled(bar_x - 1, head_screen[1], bar_x + 2, leg_screen[1], imgui.get_color_u32_rgba(0.02, 0.02, 0.02, 0.6))
                 health_perc = max(0, min(100, health)) / 100.0
@@ -313,7 +320,7 @@ def process_features(draw_list):
                         draw_list.add_circle(bone_positions_2d[6][0], bone_positions_2d[6][1], max(2.5, h_diff / 12.0), color, num_segments=16, thickness=1.5)
             except: continue
 
-    # --- ЗАПИСЬ АИМБОТА В ПАМЯТЬ ---
+    # Запись углов аима
     if cfg_aim_enabled and is_shooting and best_target_angles:
         try:
             current_pitch = pm.read_float(client + dwViewAngles)
@@ -369,7 +376,6 @@ def main():
     style = win32gui.GetWindowLong(hwnd, win32con.GWL_STYLE) & ~(win32con.WS_CAPTION | win32con.WS_THICKFRAME)
     win32gui.SetWindowLong(hwnd, win32con.GWL_STYLE, style)
     
-    # Первичная настройка стилей (Изначально меню открыто -> окно кликабельно)
     win32gui.SetWindowLong(hwnd, win32con.GWL_EXSTYLE, win32con.WS_EX_LAYERED)
     update_window_input_state(hwnd, menu_open)
     
@@ -389,12 +395,14 @@ def main():
         impl.process_inputs()
         imgui.new_frame()
         
-        # Переключение видимости меню и КЛИКАБЕЛЬНОСТИ по кнопке INSERT
-        if win32api.GetAsyncKeyState(win32con.VK_INSERT) & 1:
+        # --- ОБНОВЛЕННЫЙ БИНД НА F5 ---
+        if win32api.GetAsyncKeyState(win32con.VK_F5) & 1:
             menu_open = not menu_open
             update_window_input_state(hwnd, menu_open)
+            if not menu_open:
+                force_focus_game()  # Принудительно отдаем клики в CS2
 
-        # Быстрый бинд F7 (работает всегда)
+        # Быстрый бинд F7 для аима
         if win32api.GetAsyncKeyState(win32con.VK_F7) & 1:
             cfg_aim_enabled = not cfg_aim_enabled
 
@@ -402,24 +410,24 @@ def main():
             last_check = time.time()
             try_connect_game()
 
-        # Фоновый холст для ESP и Фова
+        # Фоновый холст (ESP + Подсказки)
         imgui.set_next_window_size(WINDOW_WIDTH, WINDOW_HEIGHT)
         imgui.set_next_window_position(0, 0)
         imgui.begin("Canvas", flags=imgui.WINDOW_NO_TITLE_BAR | imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_BACKGROUND | imgui.WINDOW_NO_INPUTS)
         
-        # Текстовая подсказка по биндам в углу экрана
-        imgui.get_window_draw_list().add_text(15, WINDOW_HEIGHT - 45, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 0.6), "[INSERT] Show/Hide Menu   |   [F7] Toggle Aimbot")
+        # Удобная подсказка по биндам снизу экрана
+        imgui.get_window_draw_list().add_text(15, WINDOW_HEIGHT - 45, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 0.5), "[F5] Show/Hide Setup Menu   |   [F7] Toggle Aimbot Lock")
         
         if offsets_loaded and pm: 
             process_features(imgui.get_window_draw_list())
             if cfg_aim_enabled:
                 fov_pixels = (cfg_aim_fov * WINDOW_WIDTH) / 180.0
-                imgui.get_window_draw_list().add_circle(SCREEN_CENTER_X, SCREEN_CENTER_Y, fov_pixels, imgui.get_color_u32_rgba(0.6, 0.0, 0.0, 0.3), num_segments=48, thickness=1.2)
+                imgui.get_window_draw_list().add_circle(SCREEN_CENTER_X, SCREEN_CENTER_Y, fov_pixels, imgui.get_color_u32_rgba(0.6, 0.0, 0.0, 0.25), num_segments=48, thickness=1.2)
         imgui.end()
 
-        # Интерактивное меню (рендерится только если menu_open == True)
+        # Меню управления (Отрисовывается только если menu_open = True)
         if menu_open:
-            imgui.set_next_window_position(50, 50, condition=imgui.FIRST_USE_EVER)
+            imgui.set_next_window_position(60, 60, condition=imgui.FIRST_USE_EVER)
             imgui.set_next_window_size(460, 320, condition=imgui.FIRST_USE_EVER)
             imgui.begin("BLOODWARE // MULTIHACK V2", flags=imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_COLLAPSE)
             
@@ -427,7 +435,6 @@ def main():
             imgui.separator()
 
             if imgui.begin_tab_bar("CheatTabs"):
-                # ВКЛАДКА 1: ESP
                 if imgui.begin_tab_item("VISUALS")[0]:
                     imgui.spacing()
                     _, cfg_esp_box = imgui.checkbox("Enable 2D Box ESP", cfg_esp_box)
@@ -438,20 +445,13 @@ def main():
                     imgui.text(f"Visible points: {stats['visible']}")
                     imgui.end_tab_item()
 
-                # ВКЛАДКА 2: Настройка AIMBOT (Полностью кликабельная!)
                 if imgui.begin_tab_item("AIMBOT")[0]:
                     imgui.spacing()
                     aim_status = "ACTIVE" if cfg_aim_enabled else "MUTED"
                     _, cfg_aim_enabled = imgui.checkbox(f"Enable Aimbot Lock ({aim_status})", cfg_aim_enabled)
-                    
-                    # Фикс для ботов!
                     _, cfg_aim_ignore_visibility = imgui.checkbox("Ignore Visibility Check (For Bots / DM)", cfg_aim_ignore_visibility)
-                    if imgui.is_item_hovered():
-                        imgui.set_tooltip("Рекомендуется включить для ботов, так как игра не всегда обновляет их статус видимости.")
                     
                     imgui.separator()
-                    
-                    # Ползунки теперь реагируют идеально
                     _, cfg_aim_fov = imgui.slider_float("FOV Radius", cfg_aim_fov, 1.0, 45.0, "%.1f deg")
                     _, cfg_aim_smooth = imgui.slider_float("Smoothing Speed", cfg_aim_smooth, 1.0, 25.0, "%.1f")
                     
@@ -462,7 +462,6 @@ def main():
                     if imgui.radio_button("Neck (Bone 5)", cfg_aim_bone == 5): cfg_aim_bone = 5
                     imgui.same_line()
                     if imgui.radio_button("Chest (Bone 4)", cfg_aim_bone == 4): cfg_aim_bone = 4
-                    
                     imgui.end_tab_item()
             imgui.end_tab_bar()
             imgui.end()
