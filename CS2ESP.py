@@ -263,47 +263,51 @@ def process_visuals_and_sync(draw_list):
 
         list_entry = pm.read_longlong(entity_list + 16)
         if list_entry:
-            # Расширяем до 128 слотов, чтобы детектить админов в глубоком спектре паблика
+            # Сканируем до 128 слотов контроллеров для больших серверов сообщества
             for slot in range(1, 128):
                 try:
-                    pawn_chunk = (slot & 0x7FFF) >> 9
-                    pawn_slot = slot & 0x1FF
+                    controller = pm.read_longlong(list_entry + 112 * slot)
+                    if not controller: continue
+                    
+                    # Получаем хэндл Pawn сущности напрямую из контроллера игрока
+                    pawn_handle = pm.read_uint(controller + m_hPlayerPawn)
+                    if not pawn_handle or pawn_handle == 0xFFFFFFFF: continue
+                    
+                    # Декодируем хэндл для поиска в структуре EntityList
+                    pawn_chunk = (pawn_handle & 0x7FFF) >> 9
+                    pawn_slot = pawn_handle & 0x1FF
                     list_entry2 = pm.read_longlong(entity_list + 8 * pawn_chunk + 16)
                     if not list_entry2: continue
                     
                     entity_pawn = pm.read_longlong(list_entry2 + 112 * pawn_slot)
                     if not entity_pawn: continue
 
-                    # Поиск контроллера для этой сущности, чтобы забрать никнейм
-                    controller = pm.read_longlong(list_entry + 112 * slot)
-
-                    # --- УЛУЧШЕННЫЙ ДЕТЕКТ НАБЛЮДАТЕЛЕЙ ---
+                    # --- ИСПРАВЛЕННАЯ И НАДЕЖНАЯ ЛОГИКА НАБЛЮДАТЕЛЕЙ ---
                     if local_pawn_handle and m_pObserverServices and m_hObserverTarget:
                         try:
                             obs_services = pm.read_longlong(entity_pawn + m_pObserverServices)
                             if obs_services:
                                 target_handle = pm.read_uint(obs_services + m_hObserverTarget)
-                                if target_handle == local_pawn_handle:
-                                    s_name = "Unknown Spec"
-                                    if controller:
-                                        name_ptr = pm.read_longlong(controller + m_sSanitizedPlayerName)
-                                        if name_ptr:
-                                            name_bytes = pm.read_bytes(name_ptr, 32)
-                                            s_name = name_bytes.split(b'\x00')[0].decode('utf-8', errors='ignore')
-                                    if not controller or s_name == "Unknown Spec" or s_name == "":
-                                        s_name = f"Spectator ({slot})"
+                                # Проверяем, совпадает ли цель наблюдения с нашим хэндлом
+                                if target_handle == local_pawn_handle and entity_pawn != local_pawn:
+                                    name_ptr = pm.read_longlong(controller + m_sSanitizedPlayerName)
+                                    if name_ptr:
+                                        name_bytes = pm.read_bytes(name_ptr, 64)
+                                        s_name = name_bytes.split(b'\x00')[0].decode('utf-8', errors='ignore')
+                                    else:
+                                        s_name = f"Player ({slot})"
                                         
-                                    if s_name not in current_spectators:
+                                    if s_name and s_name not in current_spectators:
                                         current_spectators.append(s_name)
                         except: pass
 
-                    # Если глобальный тумблер ВХ выключен, отрисовку пропускаем, но спектаторов продолжаем собирать!
+                    # Если F8 выключил отображение, то визуалы не рисуем, но сбор спектаторов выше все равно сработал!
                     if not cfg_esp_enabled:
                         continue
 
-                    # Ограничение игрового цикла для отрисовки ESP (стандартные 64 слота)
+                    # Ограничение игрового рендера для ESP (стандартные 64 слота активных игроков)
                     if slot > 64: continue
-                    if not controller: continue
+                    if entity_pawn == local_pawn: continue
                     
                     team = pm.read_int(controller + m_iTeamNum)
                     if team not in [2, 3] or team == local_team: continue
@@ -428,7 +432,7 @@ def main():
         impl.process_inputs()
         imgui.new_frame()
         
-        # Переключение меню
+        # Переключение меню (F5)
         if win32api.GetAsyncKeyState(win32con.VK_F5) & 1:
             menu_open = not menu_open
             update_window_input_state(hwnd, menu_open)
@@ -441,7 +445,7 @@ def main():
         if win32api.GetAsyncKeyState(win32con.VK_F7) & 1:
             cfg_aim_enabled = not cfg_aim_enabled
 
-        # [НОВОЕ] F8 Переключатель ВХ
+        # Переключатель ВХ (F8)
         if win32api.GetAsyncKeyState(win32con.VK_F8) & 1:
             cfg_esp_enabled = not cfg_esp_enabled
 
@@ -476,9 +480,9 @@ def main():
                 imgui.get_window_draw_list().add_circle(SCREEN_CENTER_X, SCREEN_CENTER_Y, fov_pixels, imgui.get_color_u32_rgba(0.6, 0.0, 0.0, 0.25), num_segments=48, thickness=1.2)
         imgui.end()
 
-        # Виджеты HUD
+        # Виджеты HUD справа
         if cfg_show_hud_stats:
-            # 1. Основной системный виджет справа
+            # 1. Основной системный виджет
             imgui.set_next_window_position(WINDOW_WIDTH - 240, 30, condition=imgui.ALWAYS)
             imgui.set_next_window_size(220, 150)
             imgui.begin("HUD_STATUS_PANEL", flags=imgui.WINDOW_NO_TITLE_BAR | imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_BACKGROUND | imgui.WINDOW_NO_INPUTS)
@@ -511,7 +515,7 @@ def main():
             imgui.text(f"Targets Tracked: {stats['enemies'] if cfg_esp_enabled else 0}")
             imgui.end()
 
-            # 2. Виджет спектаторов справа под основным виджетом
+            # 2. Выровненный по правому краю список наблюдателей
             if spectators_list:
                 imgui.set_next_window_position(WINDOW_WIDTH - 240, 195, condition=imgui.ALWAYS)
                 imgui.set_next_window_size(220, 35 + len(spectators_list) * 20)
