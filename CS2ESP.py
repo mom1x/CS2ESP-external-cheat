@@ -8,25 +8,22 @@ from imgui.integrations.glfw import GlfwRenderer
 import glfw
 import OpenGL.GL as gl
 
-# Корректное определение масштабирования экрана (DPI)
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(2)
 except:
     try: ctypes.windll.user32.SetProcessDPIAware()
     except: pass
 
-# Размеры экрана
 WINDOW_WIDTH = win32api.GetSystemMetrics(0)
 WINDOW_HEIGHT = win32api.GetSystemMetrics(1)
 SCREEN_CENTER_X = WINDOW_WIDTH / 2
 SCREEN_CENTER_Y = WINDOW_HEIGHT / 2
 
-# Глобальные смещения (офсеты)
+# Смещения базовые
 dwEntityList, dwLocalPlayerPawn, dwViewMatrix, dwLocalPlayerController, dwViewAngles = None, None, None, None, None
 m_iTeamNum, m_hPlayerPawn, m_iHealth, m_vecOrigin, m_pGameSceneNode = None, None, None, None, None
 m_modelState, m_entitySpottedState, m_vecViewOffset = None, None, None
 
-# Состояние чита и игры
 pm = None
 client = None
 config_status = "STABLE"
@@ -35,28 +32,19 @@ offsets_loaded = False
 stats = {"enemies": 0, "visible": 0}
 local_idx_global = -1
 
-# Настройки интерфейса
 menu_open = True            
 cfg_show_hud_stats = True   
 
-# Вкладка 1: AIMBOT
-cfg_aim_enabled = True
-cfg_aim_ignore_visibility = True  
-cfg_aim_fov = 12.0        
-cfg_aim_smooth = 2.0      
-cfg_aim_bone = 6          
-
-# Вкладка 2: TRIGGERBOT
-cfg_trigger_enabled = True
-cfg_trigger_radius = 4.0   
-cfg_trigger_delay = 10     
-
-# Вкладка 3: VISUALS (ESP)
+# Настройки систем
 cfg_esp_box = True
 cfg_esp_skeleton = True
 cfg_esp_tracers = False
+cfg_aim_enabled = True
+cfg_aim_ignore_visibility = True  
+cfg_aim_fov = 15.0        # Радиус FOV в градусах
+cfg_aim_smooth = 4.0      # Плавность (чем меньше, тем быстрее и жестче липнет)
+cfg_aim_bone = 6          # 6 - Голова, 5 - Шея, 4 - Грудь
 
-# Структура скелета
 BONE_CONNECTIONS = [
     (6, 5), (5, 4), (4, 0),              
     (5, 8), (8, 9), (9, 11),            
@@ -153,20 +141,18 @@ def get_bone_position(pm, bone_array, bone_index):
         return [bx, by, bz]
     except: return None
 
-def async_hack_processor():
-    global pm, client, offsets_loaded, local_idx_global, menu_open
-    global cfg_aim_enabled, cfg_aim_fov, cfg_aim_smooth, cfg_aim_bone, cfg_aim_ignore_visibility
-    global cfg_trigger_enabled, cfg_trigger_radius, cfg_trigger_delay
+# --- ВЫСОКОСКОРОСТНОЙ СВЕРХТОЧНЫЙ МЫШЕЧНЫЙ АИМБОТ ---
+def async_aimbot_processor():
+    global pm, client, offsets_loaded, cfg_aim_enabled, cfg_aim_fov, cfg_aim_smooth, cfg_aim_bone, cfg_aim_ignore_visibility, local_idx_global
     
     while True:
-        time.sleep(0.001)
+        time.sleep(0.001)  # Частота опроса 1000 Гц
         
-        if not pm or not offsets_loaded or menu_open:
+        if not pm or not offsets_loaded or not cfg_aim_enabled:
             continue
             
-        aim_key_pressed = (win32api.GetAsyncKeyState(0x01) & 0x8000) != 0
-        
-        if not aim_key_pressed and not cfg_trigger_enabled:
+        # Активация аима строго при удержании ЛКМ (0x01)
+        if (win32api.GetAsyncKeyState(0x01) & 0x8000) == 0:
             continue
             
         try:
@@ -180,14 +166,14 @@ def async_hack_processor():
             entity_list = pm.read_longlong(client + dwEntityList)
             if not entity_list: continue
             
+            # Перевод FOV из градусов в пиксели экрана
             fov_pixels = (cfg_aim_fov * WINDOW_WIDTH) / 180.0
             
             best_target_dx = None
             best_target_dy = None
             min_screen_dist = fov_pixels
             
-            trigger_shot_ready = False
-            
+            # Оптимизация: Игроки всегда находятся в первом чанке (слоты 1-64)
             list_entry = pm.read_longlong(entity_list + 16) 
             if not list_entry: continue
             
@@ -214,6 +200,7 @@ def async_hack_processor():
                     health = pm.read_int(entity_pawn + m_iHealth)
                     if health <= 0 or health > 200: continue
                     
+                    # Проверка видимости
                     if not cfg_aim_ignore_visibility and local_idx_global != -1 and m_entitySpottedState:
                         try:
                             slot_idx = local_idx_global - 1
@@ -227,51 +214,28 @@ def async_hack_processor():
                     bone_array = pm.read_longlong(skeleton_address + 0x80)
                     if not bone_array: continue
                     
-                    if aim_key_pressed and cfg_aim_enabled:
-                        bone_pos3d = get_bone_position(pm, bone_array, cfg_aim_bone)
-                        if bone_pos3d:
-                            bone_screen = w2s(view_matrix, bone_pos3d[0], bone_pos3d[1], bone_pos3d[2])
-                            if bone_screen:
-                                dx = bone_screen[0] - SCREEN_CENTER_X
-                                dy = bone_screen[1] - SCREEN_CENTER_Y
-                                dist = math.hypot(dx, dy)
-                                
-                                if dist < min_screen_dist:
-                                    min_screen_dist = dist
-                                    best_target_dx = dx
-                                    best_target_dy = dy
-                                    
-                    if cfg_trigger_enabled:
-                        for check_bone in [4, 5, 6]:
-                            t_pos3d = get_bone_position(pm, bone_array, check_bone)
-                            if t_pos3d:
-                                t_screen = w2s(view_matrix, t_pos3d[0], t_pos3d[1], t_pos3d[2])
-                                if t_screen:
-                                    tdx = t_screen[0] - SCREEN_CENTER_X
-                                    tdy = t_screen[1] - SCREEN_CENTER_Y
-                                    if math.hypot(tdx, tdy) <= cfg_trigger_radius:
-                                        trigger_shot_ready = True
-                                        break
+                    bone_pos3d = get_bone_position(pm, bone_array, cfg_aim_bone)
+                    if bone_pos3d:
+                        bone_screen = w2s(view_matrix, bone_pos3d[0], bone_pos3d[1], bone_pos3d[2])
+                        if bone_screen:
+                            # Считаем смещение от центра прицела в пикселях
+                            dx = bone_screen[0] - SCREEN_CENTER_X
+                            dy = bone_screen[1] - SCREEN_CENTER_Y
+                            dist = math.hypot(dx, dy)
+                            
+                            if dist < min_screen_dist:
+                                min_screen_dist = dist
+                                best_target_dx = dx
+                                best_target_dy = dy
                 except: continue
                 
-            if aim_key_pressed and cfg_aim_enabled and best_target_dx is not None and best_target_dy is not None:
-                if cfg_aim_smooth <= 1.0:
-                    move_x = best_target_dx
-                    move_y = best_target_dy
-                else:
-                    move_x = best_target_dx / cfg_aim_smooth
-                    move_y = best_target_dy / cfg_aim_smooth
+            # Если цель найдена внутри круга FOV — плавно смещаем мышь ОС Windows
+            if best_target_dx is not None and best_target_dy is not None:
+                move_x = best_target_dx / max(1.0, cfg_aim_smooth)
+                move_y = best_target_dy / max(1.0, cfg_aim_smooth)
                 
+                # Симуляция аппаратного перемещения мыши
                 win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, int(move_x), int(move_y), 0, 0)
-                
-            if trigger_shot_ready and cfg_trigger_enabled:
-                if cfg_trigger_delay > 0:
-                    time.sleep(cfg_trigger_delay / 1000.0)
-                win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
-                time.sleep(0.01)
-                win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
-                time.sleep(0.08) 
-                
         except: pass
 
 def process_visuals_and_sync(draw_list):
@@ -343,7 +307,7 @@ def process_visuals_and_sync(draw_list):
                     l_x, r_x = head_screen[0] - (w_diff / 2.0), head_screen[0] + (w_diff / 2.0)
                     
                     if cfg_esp_box:
-                        draw_list.add_rect(l_x, head_screen[1], r_x, leg_screen[1], color, 0.0, -1, 1.5)
+                        draw_list.add_rect(l_x, head_screen[1], r_x, leg_screen[1], color, rounding=1.0, thickness=1.5)
                     if cfg_esp_tracers:
                         draw_list.add_line(SCREEN_CENTER_X, WINDOW_HEIGHT, leg_screen[0], leg_screen[1], color, 1.0)
                         
@@ -368,7 +332,7 @@ def process_visuals_and_sync(draw_list):
                                     if math.hypot(p1[0]-p2[0], p1[1]-p2[1]) < h_diff * 1.5:
                                         draw_list.add_line(p1[0], p1[1], p2[0], p2[1], imgui.get_color_u32_rgba(0.9, 0.9, 0.9, 0.75), 1.3)
                             if 6 in bone_positions_2d:
-                                draw_list.add_circle(bone_positions_2d[6][0], bone_positions_2d[6][1], max(2.5, h_diff / 12.0), color, 16, 1.5)
+                                draw_list.add_circle(bone_positions_2d[6][0], bone_positions_2d[6][1], max(2.5, h_diff / 12.0), color, num_segments=16, thickness=1.5)
                 except: continue
     except: pass
     stats = current_stats
@@ -393,9 +357,7 @@ def try_connect_game():
 
 def main():
     global cfg_esp_box, cfg_esp_skeleton, cfg_esp_tracers
-    global cfg_aim_enabled, cfg_aim_fov, cfg_aim_smooth, cfg_aim_bone, cfg_aim_ignore_visibility
-    global cfg_trigger_enabled, cfg_trigger_radius, cfg_trigger_delay
-    global menu_open, cfg_show_hud_stats
+    global cfg_aim_enabled, cfg_aim_fov, cfg_aim_smooth, cfg_aim_bone, cfg_aim_ignore_visibility, menu_open, cfg_show_hud_stats
 
     if not glfw.init(): return
     glfw.window_hint(glfw.TRANSPARENT_FRAMEBUFFER, glfw.TRUE)
@@ -411,7 +373,7 @@ def main():
     style = win32gui.GetWindowLong(hwnd, win32con.GWL_STYLE) & ~(win32con.WS_CAPTION | win32con.WS_THICKFRAME)
     win32gui.SetWindowLong(hwnd, win32con.GWL_STYLE, style)
     
-    win32gui.SetWindowLong(hwnd, win32con.WS_EX_LAYERED)
+    win32gui.SetWindowLong(hwnd, win32con.GWL_EXSTYLE, win32con.WS_EX_LAYERED)
     update_window_input_state(hwnd, menu_open)
     win32gui.SetWindowPos(hwnd, win32con.HWND_TOPMOST, 0, 0, 0, 0, win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE)
 
@@ -423,8 +385,9 @@ def main():
     impl = GlfwRenderer(window)
     load_local_offsets()
     
-    hack_thread = threading.Thread(target=async_hack_processor, daemon=True)
-    hack_thread.start()
+    # Поток аимбота теперь крутится отдельно на mouse_event
+    aim_thread = threading.Thread(target=async_aimbot_processor, daemon=True)
+    aim_thread.start()
     
     last_check = 0
 
@@ -442,78 +405,100 @@ def main():
         if win32api.GetAsyncKeyState(win32con.VK_F6) & 1:
             cfg_show_hud_stats = not cfg_show_hud_stats
 
+        if win32api.GetAsyncKeyState(win32con.VK_F7) & 1:
+            cfg_aim_enabled = not cfg_aim_enabled
+
         if not pm and time.time() - last_check > 2.0:
             last_check = time.time()
             try_connect_game()
 
-        # Отрисовка ESP холста (Исправлено: теперь передаются все 3 аргумента)
-        imgui.set_next_window_size(float(WINDOW_WIDTH), float(WINDOW_HEIGHT), imgui.ALWAYS)
-        imgui.set_next_window_position(0.0, 0.0, imgui.ALWAYS)
+        imgui.set_next_window_size(WINDOW_WIDTH, WINDOW_HEIGHT)
+        imgui.set_next_window_position(0, 0)
+        imgui.begin("Canvas", flags=imgui.WINDOW_NO_TITLE_BAR | imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_BACKGROUND | imgui.WINDOW_NO_INPUTS)
         
-        imgui.begin("ESP_Overlay", flags=imgui.WINDOW_NO_TITLE_BAR | imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_MOVE | imgui.WINDOW_NO_BACKGROUND | imgui.WINDOW_NO_INPUTS)
-        draw_list = imgui.get_window_draw_list()
-        process_visuals_and_sync(draw_list)
+        imgui.get_window_draw_list().add_text(15, WINDOW_HEIGHT - 45, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 0.4), "[F5] Menu  |  [F6] HUD Widgets  |  [F7] Toggle Aim")
+        
+        if offsets_loaded and pm: 
+            process_visuals_and_sync(imgui.get_window_draw_list())
+            if cfg_aim_enabled:
+                fov_pixels = (cfg_aim_fov * WINDOW_WIDTH) / 180.0
+                imgui.get_window_draw_list().add_circle(SCREEN_CENTER_X, SCREEN_CENTER_Y, fov_pixels, imgui.get_color_u32_rgba(0.6, 0.0, 0.0, 0.25), num_segments=48, thickness=1.2)
         imgui.end()
 
-        # Отрисовка виджета состояния (Исправлено: передаются все 3 аргумента)
         if cfg_show_hud_stats:
-            imgui.set_next_window_position(float(WINDOW_WIDTH - 240), 30.0, imgui.ALWAYS)
-            imgui.set_next_window_size(220.0, 130.0, imgui.ALWAYS)
-            imgui.begin("Stats HUD", flags=imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_COLLAPSE)
-            imgui.text(f"Status: {game_status}")
-            imgui.text(f"Config: {config_status}")
+            imgui.set_next_window_position(WINDOW_WIDTH - 240, 30, condition=imgui.ALWAYS)
+            imgui.set_next_window_size(220, 130)
+            imgui.begin("HUD_STATUS_PANEL", flags=imgui.WINDOW_NO_TITLE_BAR | imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_BACKGROUND | imgui.WINDOW_NO_INPUTS)
+            
+            dl = imgui.get_window_draw_list()
+            pos = imgui.get_window_position()
+            size = imgui.get_window_size()
+            dl.add_rect_filled(pos.x, pos.y, pos.x + size.x, pos.y + size.y, imgui.get_color_u32_rgba(0.04, 0.03, 0.03, 0.8), rounding=5.0)
+            dl.add_rect(pos.x, pos.y, pos.x + size.x, pos.y + size.y, imgui.get_color_u32_rgba(0.6, 0.0, 0.0, 0.75), rounding=5.0, thickness=1.5)
+            
+            imgui.set_cursor_pos((12, 10))
+            imgui.text_colored("BLOODHUD SYSTEM", 0.9, 0.0, 0.0, 1.0)
             imgui.separator()
-            imgui.text(f"Enemies Found: {stats['enemies']}")
-            imgui.text(f"Visible Targets: {stats['visible']}")
+            
+            g_color = [0.0, 1.0, 0.2, 1.0] if game_status == "CONNECTED" else [0.8, 0.1, 0.1, 1.0]
+            imgui.text("Link Status: ")
+            imgui.same_line()
+            imgui.text_colored(game_status, *g_color)
+            
+            a_color = [0.0, 1.0, 0.2, 1.0] if cfg_aim_enabled else [0.5, 0.5, 0.5, 1.0]
+            imgui.text("Aimbot Logic: ")
+            imgui.same_line()
+            imgui.text_colored("MOUSE SIM" if cfg_aim_enabled else "MUTED", *a_color)
+            
+            imgui.text(f"Targets Tracked: {stats['enemies']}")
+            imgui.text(f"Visible (Spotted): {stats['visible']}")
             imgui.end()
 
-        # Меню управления читом
         if menu_open:
-            imgui.set_next_window_position(80.0, 80.0, imgui.FIRST_USE_EVER)
-            imgui.set_next_window_size(480.0, 360.0, imgui.FIRST_USE_EVER)
-            imgui.begin("BloodHUD Pro v2.1 || Menu", True)
+            imgui.set_next_window_position(60, 60, condition=imgui.FIRST_USE_EVER)
+            imgui.set_next_window_size(460, 320, condition=imgui.FIRST_USE_EVER)
+            imgui.begin("BLOODWARE // MULTIHACK V2", flags=imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_COLLAPSE)
             
-            imgui.text("Press [F5] to Hide/Show Menu")
-            imgui.text("Press [F6] to Toggle HUD Stats")
+            imgui.text(f"Status: {game_status} | Config: {config_status}")
             imgui.separator()
-            
-            if imgui.begin_tab_bar("HackTabs"):
-                if imgui.begin_tab_item("Aimbot Matrix").selected:
-                    _, cfg_aim_enabled = imgui.checkbox("Enable Aim Assist", cfg_aim_enabled)
-                    _, cfg_aim_ignore_visibility = imgui.checkbox("Ignore Visibility Check", cfg_aim_ignore_visibility)
-                    _, cfg_aim_fov = imgui.slider_float("FOV Radius", cfg_aim_fov, 1.0, 50.0, "%.1f")
-                    _, cfg_aim_smooth = imgui.slider_float("Smoothing factor", cfg_aim_smooth, 1.0, 20.0, "%.1f")
+
+            if imgui.begin_tab_bar("CheatTabs"):
+                if imgui.begin_tab_item("VISUALS")[0]:
+                    imgui.spacing()
+                    _, cfg_esp_box = imgui.checkbox("Enable 2D Box ESP", cfg_esp_box)
+                    _, cfg_esp_skeleton = imgui.checkbox("Enable Skeleton Bones", cfg_esp_skeleton)
+                    _, cfg_esp_tracers = imgui.checkbox("Enable Snaplines", cfg_esp_tracers)
+                    imgui.end_tab_item()
+
+                if imgui.begin_tab_item("AIMBOT")[0]:
+                    imgui.spacing()
+                    _, cfg_aim_enabled = imgui.checkbox("Enable Mouse Aimbot", cfg_aim_enabled)
+                    _, cfg_aim_ignore_visibility = imgui.checkbox("Ignore Visibility (For Deathmatch)", cfg_aim_ignore_visibility)
+                    imgui.separator()
                     
-                    imgui.text("Target Bone:")
+                    _, cfg_aim_fov = imgui.slider_float("FOV Radius", cfg_aim_fov, 1.0, 45.0, "%.1f deg")
+                    _, cfg_aim_smooth = imgui.slider_float("Smoothing (Lower = Faster)", cfg_aim_smooth, 1.0, 25.0, "%.1f")
+                    
+                    imgui.spacing()
+                    imgui.text("Target Bone Position:")
                     if imgui.radio_button("Head (Bone 6)", cfg_aim_bone == 6): cfg_aim_bone = 6
                     imgui.same_line()
                     if imgui.radio_button("Neck (Bone 5)", cfg_aim_bone == 5): cfg_aim_bone = 5
                     imgui.same_line()
                     if imgui.radio_button("Chest (Bone 4)", cfg_aim_bone == 4): cfg_aim_bone = 4
                     imgui.end_tab_item()
-                    
-                if imgui.begin_tab_item("Triggerbot").selected:
-                    _, cfg_trigger_enabled = imgui.checkbox("Enable Auto Trigger", cfg_trigger_enabled)
-                    _, cfg_trigger_radius = imgui.slider_float("Trigger Box Radius", cfg_trigger_radius, 1.0, 15.0, "%.1f")
-                    _, cfg_trigger_delay = imgui.slider_int("Shot Delay (ms)", cfg_trigger_delay, 0, 200)
-                    imgui.end_tab_item()
-                    
-                if imgui.begin_tab_item("Visual Overlay").selected:
-                    _, cfg_esp_box = imgui.checkbox("Draw Bounding Boxes", cfg_esp_box)
-                    _, cfg_esp_skeleton = imgui.checkbox("Draw Bone Skeletons", cfg_esp_skeleton)
-                    _, cfg_esp_tracers = imgui.checkbox("Draw Snap Lines", cfg_esp_tracers)
-                    imgui.end_tab_item()
-                imgui.end_tab_bar()
-                
+            imgui.end_tab_bar()
             imgui.end()
 
-        gl.glClearColor(0.0, 0.0, 0.0, 0.0)
+        imgui.end_frame()
+        gl.glClearColor(0, 0, 0, 0)
         gl.glClear(gl.GL_COLOR_BUFFER_BIT)
+        imgui.render()
         impl.render(imgui.get_draw_data())
         glfw.swap_buffers(window)
 
     impl.shutdown()
     glfw.terminate()
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
