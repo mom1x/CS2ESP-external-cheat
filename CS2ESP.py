@@ -32,19 +32,18 @@ offsets_loaded = False
 stats = {"enemies": 0, "visible": 0}
 local_idx_global = -1
 
-# Состояния отображения интерфейса
-menu_open = True            # Главное меню (F5)
-cfg_show_hud_stats = True   # Виджет диагностики (F6)
+menu_open = True            
+cfg_show_hud_stats = True   
 
-# Конфигурация систем чита
+# Настройки систем
 cfg_esp_box = True
 cfg_esp_skeleton = True
 cfg_esp_tracers = False
 cfg_aim_enabled = True
 cfg_aim_ignore_visibility = True  
-cfg_aim_fov = 15.0
-cfg_aim_smooth = 3.0  # Уменьшен шаг для более плотного и заметного довода
-cfg_aim_bone = 6  
+cfg_aim_fov = 15.0        # Радиус FOV в градусах
+cfg_aim_smooth = 4.0      # Плавность (чем меньше, тем быстрее и жестче липнет)
+cfg_aim_bone = 6          # 6 - Голова, 5 - Шея, 4 - Грудь
 
 BONE_CONNECTIONS = [
     (6, 5), (5, 4), (4, 0),              
@@ -142,28 +141,24 @@ def get_bone_position(pm, bone_array, bone_index):
         return [bx, by, bz]
     except: return None
 
-def normalize_angles(pitch, yaw):
-    if pitch > 89.0: pitch = 89.0
-    if pitch < -89.0: pitch = -89.0
-    while yaw > 180.0: yaw -= 360.0
-    while yaw < -180.0: yaw += 360.0
-    return pitch, yaw
-
-# --- ВЫСОКОСКОРОСТНОЙ ПОТОК АИМБОТА (~1000 Гц) ---
+# --- ВЫСОКОСКОРОСТНОЙ СВЕРХТОЧНЫЙ МЫШЕЧНЫЙ АИМБОТ ---
 def async_aimbot_processor():
     global pm, client, offsets_loaded, cfg_aim_enabled, cfg_aim_fov, cfg_aim_smooth, cfg_aim_bone, cfg_aim_ignore_visibility, local_idx_global
     
     while True:
-        time.sleep(0.001)  # Задержка в 1 миллисекунду для разгрузки процессора
+        time.sleep(0.001)  # Частота опроса 1000 Гц
         
         if not pm or not offsets_loaded or not cfg_aim_enabled:
             continue
             
-        # Нажата ли ЛКМ (Стрельба)
+        # Активация аима строго при удержании ЛКМ (0x01)
         if (win32api.GetAsyncKeyState(0x01) & 0x8000) == 0:
             continue
             
         try:
+            v_buff = pm.read_bytes(client + dwViewMatrix, 64)
+            view_matrix = struct.unpack('16f', v_buff)
+            
             local_pawn = pm.read_longlong(client + dwLocalPlayerPawn)
             if not local_pawn: continue
             
@@ -171,101 +166,79 @@ def async_aimbot_processor():
             entity_list = pm.read_longlong(client + dwEntityList)
             if not entity_list: continue
             
-            local_scene = pm.read_longlong(local_pawn + m_pGameSceneNode)
-            lx, ly, lz = struct.unpack('fff', pm.read_bytes(local_scene + m_vecOrigin, 12))
+            # Перевод FOV из градусов в пиксели экрана
+            fov_pixels = (cfg_aim_fov * WINDOW_WIDTH) / 180.0
             
-            try:
-                vox, voy, voz = struct.unpack('fff', pm.read_bytes(local_pawn + m_vecViewOffset, 12))
-                local_eye_pos = [lx + vox, ly + voy, lz + voz]
-            except:
-                local_eye_pos = [lx, ly, lz + 64.0]
-                
-            current_pitch = pm.read_float(client + dwViewAngles)
-            current_yaw = pm.read_float(client + dwViewAngles + 4)
+            best_target_dx = None
+            best_target_dy = None
+            min_screen_dist = fov_pixels
             
-            best_target_angles = None
-            min_fov_delta = cfg_aim_fov
+            # Оптимизация: Игроки всегда находятся в первом чанке (слоты 1-64)
+            list_entry = pm.read_longlong(entity_list + 16) 
+            if not list_entry: continue
             
-            for chunk in range(4):
-                list_entry = pm.read_longlong(entity_list + 8 * chunk + 16)
-                if not list_entry: continue
-                
-                for slot in range(512):
-                    if chunk == 0 and slot == 0: continue
-                    try:
-                        controller = pm.read_longlong(list_entry + 112 * slot)
-                        if not controller: continue
-                        
-                        team = pm.read_int(controller + m_iTeamNum)
-                        if team not in [2, 3] or team == local_team: continue
-                        
-                        pawn_handle = pm.read_uint(controller + m_hPlayerPawn)
-                        if not pawn_handle or pawn_handle == 0xFFFFFFFF: continue
-                        
-                        pawn_chunk = (pawn_handle & 0x7FFF) >> 9
-                        pawn_slot = pawn_handle & 0x1FF
-                        
-                        list_entry2 = pm.read_longlong(entity_list + 8 * pawn_chunk + 16)
-                        if not list_entry2: continue
-                        
-                        entity_pawn = pm.read_longlong(list_entry2 + 112 * pawn_slot)
-                        if not entity_pawn or entity_pawn == local_pawn: continue
-                        
-                        health = pm.read_int(entity_pawn + m_iHealth)
-                        if health <= 0 or health > 200: continue
-                        
-                        is_spotted = True
-                        if not cfg_aim_ignore_visibility and local_idx_global != -1 and m_entitySpottedState:
-                            try:
-                                slot_idx = local_idx_global - 1
-                                sb = entity_pawn + m_entitySpottedState
-                                mask = pm.read_uint(sb + 0xC + (slot_idx // 32) * 4)
-                                is_spotted = (mask & (1 << (slot_idx % 32))) != 0
-                            except: pass
-                            
-                        if not cfg_aim_ignore_visibility and not is_spotted: 
-                            continue
-                            
-                        game_scene = pm.read_longlong(entity_pawn + m_pGameSceneNode)
-                        skeleton_address = game_scene + m_modelState
-                        bone_array = pm.read_longlong(skeleton_address + 0x80)
-                        if not bone_array: continue
-                        
-                        aim_bone_pos3d = get_bone_position(pm, bone_array, cfg_aim_bone)
-                        if aim_bone_pos3d:
-                            dx = aim_bone_pos3d[0] - local_eye_pos[0]
-                            dy = aim_bone_pos3d[1] - local_eye_pos[1]
-                            dz = aim_bone_pos3d[2] - local_eye_pos[2]
-                            
-                            hypot_2d = math.hypot(dx, dy)
-                            target_pitch = -math.atan2(dz, hypot_2d) * 180.0 / math.pi
-                            target_yaw = math.atan2(dy, dx) * 180.0 / math.pi
-                            
-                            delta_p = target_pitch - current_pitch
-                            delta_y = target_yaw - current_yaw
-                            delta_p, delta_y = normalize_angles(delta_p, delta_y)
-                            
-                            calculated_fov = math.hypot(delta_p, delta_y)
-                            if calculated_fov < min_fov_delta:
-                                min_fov_delta = calculated_fov
-                                best_target_angles = (target_pitch, target_yaw)
-                    except: continue
+            for slot in range(1, 64):
+                try:
+                    controller = pm.read_longlong(list_entry + 112 * slot)
+                    if not controller: continue
                     
-            if best_target_angles:
-                target_p, target_y = best_target_angles
-                delta_p, delta_y = normalize_angles(target_p - current_pitch, target_y - current_yaw)
+                    team = pm.read_int(controller + m_iTeamNum)
+                    if team not in [2, 3] or team == local_team: continue
+                    
+                    pawn_handle = pm.read_uint(controller + m_hPlayerPawn)
+                    if not pawn_handle or pawn_handle == 0xFFFFFFFF: continue
+                    
+                    pawn_chunk = (pawn_handle & 0x7FFF) >> 9
+                    pawn_slot = pawn_handle & 0x1FF
+                    
+                    list_entry2 = pm.read_longlong(entity_list + 8 * pawn_chunk + 16)
+                    if not list_entry2: continue
+                    
+                    entity_pawn = pm.read_longlong(list_entry2 + 112 * pawn_slot)
+                    if not entity_pawn or entity_pawn == local_pawn: continue
+                    
+                    health = pm.read_int(entity_pawn + m_iHealth)
+                    if health <= 0 or health > 200: continue
+                    
+                    # Проверка видимости
+                    if not cfg_aim_ignore_visibility and local_idx_global != -1 and m_entitySpottedState:
+                        try:
+                            slot_idx = local_idx_global - 1
+                            sb = entity_pawn + m_entitySpottedState
+                            mask = pm.read_uint(sb + 0xC + (slot_idx // 32) * 4)
+                            if not (mask & (1 << (slot_idx % 32))): continue
+                        except: pass
+                        
+                    game_scene = pm.read_longlong(entity_pawn + m_pGameSceneNode)
+                    skeleton_address = game_scene + m_modelState
+                    bone_array = pm.read_longlong(skeleton_address + 0x80)
+                    if not bone_array: continue
+                    
+                    bone_pos3d = get_bone_position(pm, bone_array, cfg_aim_bone)
+                    if bone_pos3d:
+                        bone_screen = w2s(view_matrix, bone_pos3d[0], bone_pos3d[1], bone_pos3d[2])
+                        if bone_screen:
+                            # Считаем смещение от центра прицела в пикселях
+                            dx = bone_screen[0] - SCREEN_CENTER_X
+                            dy = bone_screen[1] - SCREEN_CENTER_Y
+                            dist = math.hypot(dx, dy)
+                            
+                            if dist < min_screen_dist:
+                                min_screen_dist = dist
+                                best_target_dx = dx
+                                best_target_dy = dy
+                except: continue
                 
-                smooth_factor = max(1.0, cfg_aim_smooth)
-                final_pitch = current_pitch + (delta_p / smooth_factor)
-                final_yaw = current_yaw + (delta_y / smooth_factor)
-                final_pitch, final_yaw = normalize_angles(final_pitch, final_yaw)
+            # Если цель найдена внутри круга FOV — плавно смещаем мышь ОС Windows
+            if best_target_dx is not None and best_target_dy is not None:
+                move_x = best_target_dx / max(1.0, cfg_aim_smooth)
+                move_y = best_target_dy / max(1.0, cfg_aim_smooth)
                 
-                pm.write_float(client + dwViewAngles, final_pitch)
-                pm.write_float(client + dwViewAngles + 4, final_yaw)
+                # Симуляция аппаратного перемещения мыши
+                win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, int(move_x), int(move_y), 0, 0)
         except: pass
 
 def process_visuals_and_sync(draw_list):
-    """Сканнер игроков исключительно для отрисовки ESP на основном холсте"""
     global stats, local_idx_global
     if not pm or not offsets_loaded: return
     
@@ -280,22 +253,18 @@ def process_visuals_and_sync(draw_list):
         entity_list = pm.read_longlong(client + dwEntityList)
         if not entity_list: return
         
-        # Динамический поиск индекса локального игрока
         if dwLocalPlayerController:
             local_ctrl = pm.read_longlong(client + dwLocalPlayerController)
-            for chunk in range(4):
-                le = pm.read_longlong(entity_list + 8 * chunk + 16)
-                if not le: continue
-                for slot in range(512):
-                    if pm.read_longlong(le + 112 * slot) == local_ctrl:
-                        local_idx_global = chunk * 512 + slot
+            list_entry_local = pm.read_longlong(entity_list + 16)
+            if list_entry_local:
+                for slot in range(64):
+                    if pm.read_longlong(list_entry_local + 112 * slot) == local_ctrl:
+                        local_idx_global = slot
                         break
 
-        for chunk in range(4):
-            list_entry = pm.read_longlong(entity_list + 8 * chunk + 16)
-            if not list_entry: continue
-            for slot in range(512):
-                if chunk == 0 and slot == 0: continue
+        list_entry = pm.read_longlong(entity_list + 16)
+        if list_entry:
+            for slot in range(1, 64):
                 try:
                     controller = pm.read_longlong(list_entry + 112 * slot)
                     if not controller: continue
@@ -342,13 +311,11 @@ def process_visuals_and_sync(draw_list):
                     if cfg_esp_tracers:
                         draw_list.add_line(SCREEN_CENTER_X, WINDOW_HEIGHT, leg_screen[0], leg_screen[1], color, 1.0)
                         
-                    # HP Bar
                     bar_x = l_x - 6
                     draw_list.add_rect_filled(bar_x - 1, head_screen[1], bar_x + 2, leg_screen[1], imgui.get_color_u32_rgba(0.02, 0.02, 0.02, 0.6))
                     health_perc = max(0, min(100, health)) / 100.0
                     draw_list.add_rect_filled(bar_x - 1, leg_screen[1] - (h_diff * health_perc), bar_x + 2, leg_screen[1], imgui.get_color_u32_rgba(0.3 + (health_perc * 0.7), 0.1, 0.1, 1.0))
                     
-                    # Скелет
                     if cfg_esp_skeleton:
                         skeleton_address = game_scene + m_modelState
                         bone_array = pm.read_longlong(skeleton_address + 0x80)
@@ -418,7 +385,7 @@ def main():
     impl = GlfwRenderer(window)
     load_local_offsets()
     
-    # Запуск выделенного асинхронного потока Аимбота
+    # Поток аимбота теперь крутится отдельно на mouse_event
     aim_thread = threading.Thread(target=async_aimbot_processor, daemon=True)
     aim_thread.start()
     
@@ -429,18 +396,15 @@ def main():
         impl.process_inputs()
         imgui.new_frame()
         
-        # --- БИНД F5: Скрытие настроек и отдача фокуса игре ---
         if win32api.GetAsyncKeyState(win32con.VK_F5) & 1:
             menu_open = not menu_open
             update_window_input_state(hwnd, menu_open)
             if not menu_open:
                 force_focus_game()
 
-        # --- БИНД F6: Переключение инфо-виджета статистики ---
         if win32api.GetAsyncKeyState(win32con.VK_F6) & 1:
             cfg_show_hud_stats = not cfg_show_hud_stats
 
-        # Быстрый бинд F7 (Вкл/Выкл самого лока)
         if win32api.GetAsyncKeyState(win32con.VK_F7) & 1:
             cfg_aim_enabled = not cfg_aim_enabled
 
@@ -448,12 +412,11 @@ def main():
             last_check = time.time()
             try_connect_game()
 
-        # Прозрачный полноэкранный холст для ESP и FOV
         imgui.set_next_window_size(WINDOW_WIDTH, WINDOW_HEIGHT)
         imgui.set_next_window_position(0, 0)
         imgui.begin("Canvas", flags=imgui.WINDOW_NO_TITLE_BAR | imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_BACKGROUND | imgui.WINDOW_NO_INPUTS)
         
-        imgui.get_window_draw_list().add_text(15, WINDOW_HEIGHT - 45, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 0.4), "[F5] Setup Menu  |  [F6] Diagnostics Widget  |  [F7] Toggle Aim")
+        imgui.get_window_draw_list().add_text(15, WINDOW_HEIGHT - 45, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 0.4), "[F5] Menu  |  [F6] HUD Widgets  |  [F7] Toggle Aim")
         
         if offsets_loaded and pm: 
             process_visuals_and_sync(imgui.get_window_draw_list())
@@ -462,13 +425,11 @@ def main():
                 imgui.get_window_draw_list().add_circle(SCREEN_CENTER_X, SCREEN_CENTER_Y, fov_pixels, imgui.get_color_u32_rgba(0.6, 0.0, 0.0, 0.25), num_segments=48, thickness=1.2)
         imgui.end()
 
-        # --- КРАСИВЫЙ ДИАГНОСТИЧЕСКИЙ ХУД НА F6 ---
         if cfg_show_hud_stats:
             imgui.set_next_window_position(WINDOW_WIDTH - 240, 30, condition=imgui.ALWAYS)
             imgui.set_next_window_size(220, 130)
             imgui.begin("HUD_STATUS_PANEL", flags=imgui.WINDOW_NO_TITLE_BAR | imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_BACKGROUND | imgui.WINDOW_NO_INPUTS)
             
-            # Рендер стильной кастомной рамки
             dl = imgui.get_window_draw_list()
             pos = imgui.get_window_position()
             size = imgui.get_window_size()
@@ -479,7 +440,6 @@ def main():
             imgui.text_colored("BLOODHUD SYSTEM", 0.9, 0.0, 0.0, 1.0)
             imgui.separator()
             
-            # Цветной статус линка
             g_color = [0.0, 1.0, 0.2, 1.0] if game_status == "CONNECTED" else [0.8, 0.1, 0.1, 1.0]
             imgui.text("Link Status: ")
             imgui.same_line()
@@ -488,13 +448,12 @@ def main():
             a_color = [0.0, 1.0, 0.2, 1.0] if cfg_aim_enabled else [0.5, 0.5, 0.5, 1.0]
             imgui.text("Aimbot Logic: ")
             imgui.same_line()
-            imgui.text_colored("1000Hz READY" if cfg_aim_enabled else "MUTED", *a_color)
+            imgui.text_colored("MOUSE SIM" if cfg_aim_enabled else "MUTED", *a_color)
             
             imgui.text(f"Targets Tracked: {stats['enemies']}")
             imgui.text(f"Visible (Spotted): {stats['visible']}")
             imgui.end()
 
-        # Главное меню настроек (F5)
         if menu_open:
             imgui.set_next_window_position(60, 60, condition=imgui.FIRST_USE_EVER)
             imgui.set_next_window_size(460, 320, condition=imgui.FIRST_USE_EVER)
@@ -513,8 +472,8 @@ def main():
 
                 if imgui.begin_tab_item("AIMBOT")[0]:
                     imgui.spacing()
-                    _, cfg_aim_enabled = imgui.checkbox("Enable Threaded Aimbot", cfg_aim_enabled)
-                    _, cfg_aim_ignore_visibility = imgui.checkbox("Ignore Visibility (For Bots / Deathmatch)", cfg_aim_ignore_visibility)
+                    _, cfg_aim_enabled = imgui.checkbox("Enable Mouse Aimbot", cfg_aim_enabled)
+                    _, cfg_aim_ignore_visibility = imgui.checkbox("Ignore Visibility (For Deathmatch)", cfg_aim_ignore_visibility)
                     imgui.separator()
                     
                     _, cfg_aim_fov = imgui.slider_float("FOV Radius", cfg_aim_fov, 1.0, 45.0, "%.1f deg")
