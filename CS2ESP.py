@@ -263,17 +263,14 @@ def process_visuals_and_sync(draw_list):
 
         list_entry = pm.read_longlong(entity_list + 16)
         if list_entry:
-            # Сканируем до 128 слотов контроллеров для больших серверов сообщества
             for slot in range(1, 128):
                 try:
                     controller = pm.read_longlong(list_entry + 112 * slot)
                     if not controller: continue
                     
-                    # Получаем хэндл Pawn сущности напрямую из контроллера игрока
                     pawn_handle = pm.read_uint(controller + m_hPlayerPawn)
                     if not pawn_handle or pawn_handle == 0xFFFFFFFF: continue
                     
-                    # Декодируем хэндл для поиска в структуре EntityList
                     pawn_chunk = (pawn_handle & 0x7FFF) >> 9
                     pawn_slot = pawn_handle & 0x1FF
                     list_entry2 = pm.read_longlong(entity_list + 8 * pawn_chunk + 16)
@@ -282,7 +279,6 @@ def process_visuals_and_sync(draw_list):
                     entity_pawn = pm.read_longlong(list_entry2 + 112 * pawn_slot)
                     if not entity_pawn: continue
 
-                    # Чтение никнейма игрока
                     s_name = f"Player ({slot})"
                     if m_sSanitizedPlayerName:
                         try:
@@ -292,7 +288,6 @@ def process_visuals_and_sync(draw_list):
                                 s_name = name_bytes.split(b'\x00')[0].decode('utf-8', errors='ignore')
                         except: pass
 
-                    # --- ИСПРАВЛЕННАЯ И НАДЕЖНАЯ ЛОГИКА НАБЛЮДАТЕЛЕЙ + АДМИН ДЕТЕКТОР ---
                     is_admin = any(tag in s_name.upper() for tag in ['[ADMIN]', '[MOD]', '★', 'OWNER', 'ROOT', 'VIP'])
                     
                     if local_pawn_handle and m_pObserverServices and m_hObserverTarget:
@@ -300,23 +295,19 @@ def process_visuals_and_sync(draw_list):
                             obs_services = pm.read_longlong(entity_pawn + m_pObserverServices)
                             if obs_services:
                                 target_handle = pm.read_uint(obs_services + m_hObserverTarget)
-                                # Проверяем, совпадает ли цель наблюдения с нашим хэндлом
                                 if target_handle == local_pawn_handle and entity_pawn != local_pawn:
                                     display_name = f"[ADMIN] {s_name}" if is_admin else s_name
                                     if display_name not in current_spectators:
                                         current_spectators.append(display_name)
                                 elif is_admin:
-                                    # Если это админ, но он не в спеках за нами, всё равно выводим предупреждение в список
                                     display_name = f"[ADMIN] {s_name} (В игре)"
                                     if display_name not in current_spectators:
                                         current_spectators.append(display_name)
                         except: pass
 
-                    # Если F8 выключил отображение, то визуалы не рисуем, но сбор спектаторов выше все равно сработал!
                     if not cfg_esp_enabled:
                         continue
 
-                    # Ограничение игрового рендера для ESP (стандартные 64 слота активных игроков)
                     if slot > 64: continue
                     if entity_pawn == local_pawn: continue
                     
@@ -443,7 +434,6 @@ def main():
         impl.process_inputs()
         imgui.new_frame()
         
-        # Переключение меню (F5)
         if win32api.GetAsyncKeyState(win32con.VK_F5) & 1:
             menu_open = not menu_open
             update_window_input_state(hwnd, menu_open)
@@ -456,11 +446,9 @@ def main():
         if win32api.GetAsyncKeyState(win32con.VK_F7) & 1:
             cfg_aim_enabled = not cfg_aim_enabled
 
-        # Переключатель ВХ (F8)
         if win32api.GetAsyncKeyState(win32con.VK_F8) & 1:
             cfg_esp_enabled = not cfg_esp_enabled
 
-        # Поиск игры
         if not pm and time.time() - last_check > 2.0:
             last_check = time.time()
             try_connect_game()
@@ -493,21 +481,43 @@ def main():
 
         # Виджеты HUD справа
         if cfg_show_hud_stats:
-            # 1. Основной системный виджет
+            # Динамический расчет высоты виджета под количество наблюдателей
+            spec_count = len(spectators_list)
+            base_height = 140
+            spec_element_height = (spec_count * 20) + 25 if spec_count > 0 else 0
+            total_height = base_height + spec_element_height
+
             imgui.set_next_window_position(WINDOW_WIDTH - 240, 30, condition=imgui.ALWAYS)
-            imgui.set_next_window_size(220, 150)
-            imgui.begin("HUD_STATUS_PANEL", flags=imgui.WINDOW_NO_TITLE_BAR | imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_BACKGROUND | imgui.WINDOW_NO_INPUTS)
+            imgui.set_next_window_size(220, total_height)
+            imgui.begin("HUD_STATUS_PANEL", flags=imgui.WINDOW_NO_TITLE_BAR | win32con.WS_EX_TRANSPARENT | imgui.WINDOW_NO_BACKGROUND | imgui.WINDOW_NO_INPUTS)
             
             dl = imgui.get_window_draw_list()
             pos = imgui.get_window_position()
             size = imgui.get_window_size()
+            
             dl.add_rect_filled(pos.x, pos.y, pos.x + size.x, pos.y + size.y, imgui.get_color_u32_rgba(0.04, 0.03, 0.03, 0.8), rounding=5.0)
             dl.add_rect(pos.x, pos.y, pos.x + size.x, pos.y + size.y, imgui.get_color_u32_rgba(0.6, 0.0, 0.0, 0.75), rounding=5.0, thickness=1.5)
             
+            # Название софта
             imgui.set_cursor_pos((12, 10))
             imgui.text_colored("BLOODHUD SYSTEM", 0.9, 0.0, 0.0, 1.0)
-            imgui.separator()
             
+            # Новая вставка: Количество наблюдателей и их ники под названием
+            imgui.set_cursor_pos((12, 30))
+            imgui.text_colored(f"Spectated Players: {spec_count}", 1.0, 1.0, 1.0, 1.0)
+            
+            for spec_name in spectators_list:
+                imgui.set_cursor_pos((12, imgui.get_cursor_pos().y + 2))
+                if "[ADMIN]" in spec_name:
+                    imgui.text_colored(f"> {spec_name}", 1.0, 0.3, 0.3, 1.0)  # Админы ярко-красным
+                else:
+                    imgui.text_colored(f"> {spec_name}", 0.85, 0.85, 0.85, 1.0) # Обычные спеки
+            
+            imgui.spacing()
+            imgui.separator()
+            imgui.spacing()
+            
+            # Статусы систем
             g_color = [0.0, 1.0, 0.2, 1.0] if game_status == "CONNECTED" else [0.8, 0.1, 0.1, 1.0]
             imgui.text("Link Status: ")
             imgui.same_line()
@@ -525,30 +535,6 @@ def main():
             
             imgui.text(f"Targets Tracked: {stats['enemies'] if cfg_esp_enabled else 0}")
             imgui.end()
-
-            # 2. Выровненный по правому краю список наблюдателей и администраторов
-            if spectators_list:
-                imgui.set_next_window_position(WINDOW_WIDTH - 240, 195, condition=imgui.ALWAYS)
-                imgui.set_next_window_size(220, 35 + len(spectators_list) * 20)
-                imgui.begin("HUD_SPEC_PANEL", flags=imgui.WINDOW_NO_TITLE_BAR | imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_BACKGROUND | imgui.WINDOW_NO_INPUTS)
-                
-                sdl = imgui.get_window_draw_list()
-                spos = imgui.get_window_position()
-                ssize = imgui.get_window_size()
-                sdl.add_rect_filled(spos.x, spos.y, spos.x + ssize.x, spos.y + ssize.y, imgui.get_color_u32_rgba(0.04, 0.03, 0.03, 0.85), rounding=5.0)
-                sdl.add_rect(spos.x, spos.y, spos.x + ssize.x, spos.y + ssize.y, imgui.get_color_u32_rgba(0.8, 0.0, 0.0, 0.85), rounding=5.0, thickness=1.5)
-                
-                imgui.set_cursor_pos((12, 8))
-                imgui.text_colored("MONITORING LIST:", 1.0, 0.1, 0.1, 1.0)
-                imgui.separator()
-                
-                for spec_name in spectators_list:
-                    imgui.set_cursor_pos((12, imgui.get_cursor_pos().y + 2))
-                    if "[ADMIN]" in spec_name:
-                        imgui.text_colored(spec_name, 1.0, 0.3, 0.3, 1.0)  # Подсвечиваем админов ярко-красным
-                    else:
-                        imgui.text_colored(f"👁 {spec_name}", 0.95, 0.95, 0.95, 1.0)
-                imgui.end()
 
         if menu_open:
             imgui.set_next_window_position(60, 60, condition=imgui.FIRST_USE_EVER)
