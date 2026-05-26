@@ -75,18 +75,27 @@ def apply_blood_theme():
     style.colors[imgui.COLOR_SLIDER_GRAB_ACTIVE] = [0.9, 0.0, 0.0, 1.0]
 
 def update_window_input_state(hwnd, is_clickable):
+    # Корректное переключение флагов окна, чтобы мышь пролетала насквозь
     style = win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
     if is_clickable:
-        style &= ~win32con.WS_EX_TRANSPARENT  
+        style &= ~win32con.WS_EX_TRANSPARENT
+        style &= ~win32con.WS_EX_NOACTIVATE
     else:
-        style |= win32con.WS_EX_TRANSPARENT   
+        style |= win32con.WS_EX_TRANSPARENT
+        style |= win32con.WS_EX_NOACTIVATE
     win32gui.SetWindowLong(hwnd, win32con.GWL_EXSTYLE, style)
 
 def force_focus_game():
     hwnd_cs2 = win32gui.FindWindow(None, "Counter-Strike 2")
     if hwnd_cs2:
-        try: win32gui.SetForegroundWindow(hwnd_cs2)
-        except: pass
+        try:
+            # Сбрасываем активность с нашего чит-окна
+            win32gui.SetActiveWindow(hwnd_cs2)
+            # Отправляем принудительный сигнал активации прямо в CS2
+            win32gui.SendMessage(hwnd_cs2, win32con.WM_ACTIVATE, win32con.WA_ACTIVE, 0)
+            win32gui.SetForegroundWindow(hwnd_cs2)
+        except:
+            pass
 
 def load_local_offsets():
     global dwEntityList, dwLocalPlayerPawn, dwViewMatrix, dwLocalPlayerController, dwViewAngles
@@ -250,7 +259,6 @@ def process_visuals_and_sync(draw_list):
         entity_list = pm.read_longlong(client + dwEntityList)
         if not entity_list: return
         
-        # 100% Определение индекса локального игрока в списке энтити
         local_player_slot = -1
         if dwLocalPlayerController:
             local_ctrl = pm.read_longlong(client + dwLocalPlayerController)
@@ -264,7 +272,7 @@ def process_visuals_and_sync(draw_list):
 
         list_entry = pm.read_longlong(entity_list + 16)
         if list_entry:
-            for slot in range(1, 64): # Проверяем основных игроков
+            for slot in range(1, 64):
                 try:
                     controller = pm.read_longlong(list_entry + 112 * slot)
                     if not controller: continue
@@ -280,7 +288,6 @@ def process_visuals_and_sync(draw_list):
                     entity_pawn = pm.read_longlong(list_entry2 + 112 * pawn_slot)
                     if not entity_pawn: continue
 
-                    # Получение никнейма без мусора
                     s_name = f"Player ({slot})"
                     if m_sSanitizedPlayerName:
                         try:
@@ -290,18 +297,15 @@ def process_visuals_and_sync(draw_list):
                                 s_name = name_bytes.split(b'\x00')[0].decode('utf-8', errors='ignore').strip()
                         except: pass
 
-                    # --- 100% АЛГОРИТМ ТРЕКИНГА СПЕКТАТОРОВ ДЛЯ КЛАТЧЕЙ ---
                     if entity_pawn != local_pawn and m_pObserverServices and m_hObserverTarget:
                         try:
                             obs_services = pm.read_longlong(entity_pawn + m_pObserverServices)
                             if obs_services:
                                 obs_mode = pm.read_int(obs_services + m_iObserverMode) if m_iObserverMode else 0
-                                # Если игрок в режиме наблюдения (1 = deathcam, 2 = freecam, 4 = chase, 5 = in-eye)
                                 if obs_mode in [1, 2, 4, 5, 6]:
                                     target_handle = pm.read_uint(obs_services + m_hObserverTarget)
-                                    target_idx = target_handle & 0x1FF # Получаем чистый индекс из хэндла цели
+                                    target_idx = target_handle & 0x1FF
                                     
-                                    # Жесткое сравнение по индексу слота локального игрока
                                     if target_idx == local_player_slot and local_player_slot != -1:
                                         if s_name and s_name not in current_spectators:
                                             current_spectators.append(s_name)
@@ -435,7 +439,8 @@ def main():
         if win32api.GetAsyncKeyState(win32con.VK_F5) & 1:
             menu_open = not menu_open
             update_window_input_state(hwnd, menu_open)
-            if not menu_open: force_focus_game()
+            if not menu_open: 
+                force_focus_game()
 
         if win32api.GetAsyncKeyState(win32con.VK_F6) & 1: cfg_show_hud_stats = not cfg_show_hud_stats
         if win32api.GetAsyncKeyState(win32con.VK_F7) & 1: cfg_aim_enabled = not cfg_aim_enabled
@@ -475,7 +480,7 @@ def main():
             spec_count = len(spectators_list)
             base_height = 140
             spec_element_height = (spec_count * 20) + 25 if spec_count > 0 else 0
-            total_height = base_height + spec_element_height
+Total_height = base_height + spec_element_height
 
             imgui.set_next_window_position(WINDOW_WIDTH - 240, 30, condition=imgui.ALWAYS)
             imgui.set_next_window_size(220, total_height)
@@ -488,15 +493,12 @@ def main():
             dl.add_rect_filled(pos.x, pos.y, pos.x + size.x, pos.y + size.y, imgui.get_color_u32_rgba(0.04, 0.03, 0.03, 0.8), rounding=5.0)
             dl.add_rect(pos.x, pos.y, pos.x + size.x, pos.y + size.y, imgui.get_color_u32_rgba(0.6, 0.0, 0.0, 0.75), rounding=5.0, thickness=1.5)
             
-            # Название софта
             imgui.set_cursor_pos((12, 10))
             imgui.text_colored("BLOODHUD SYSTEM", 0.9, 0.0, 0.0, 1.0)
             
-            # Количество наблюдателей под BLOODHUD SYSTEM
             imgui.set_cursor_pos((12, 30))
             imgui.text_colored(f"Spectated Players: {spec_count}", 1.0, 1.0, 1.0, 1.0)
             
-            # Вывод ников
             for spec_name in spectators_list:
                 imgui.set_cursor_pos((12, imgui.get_cursor_pos().y + 2))
                 imgui.text_colored(f"> {spec_name}", 0.85, 0.85, 0.85, 1.0) 
