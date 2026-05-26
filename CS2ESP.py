@@ -75,7 +75,6 @@ def apply_blood_theme():
     style.colors[imgui.COLOR_SLIDER_GRAB_ACTIVE] = [0.9, 0.0, 0.0, 1.0]
 
 def update_window_input_state(hwnd, is_clickable):
-    # Корректное переключение флагов окна, чтобы мышь пролетала насквозь
     style = win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
     if is_clickable:
         style &= ~win32con.WS_EX_TRANSPARENT
@@ -89,9 +88,7 @@ def force_focus_game():
     hwnd_cs2 = win32gui.FindWindow(None, "Counter-Strike 2")
     if hwnd_cs2:
         try:
-            # Сбрасываем активность с нашего чит-окна
             win32gui.SetActiveWindow(hwnd_cs2)
-            # Отправляем принудительный сигнал активации прямо в CS2
             win32gui.SendMessage(hwnd_cs2, win32con.WM_ACTIVATE, win32con.WA_ACTIVE, 0)
             win32gui.SetForegroundWindow(hwnd_cs2)
         except:
@@ -480,7 +477,7 @@ def main():
             spec_count = len(spectators_list)
             base_height = 140
             spec_element_height = (spec_count * 20) + 25 if spec_count > 0 else 0
-Total_height = base_height + spec_element_height
+            total_height = base_height + spec_element_height
 
             imgui.set_next_window_position(WINDOW_WIDTH - 240, 30, condition=imgui.ALWAYS)
             imgui.set_next_window_size(220, total_height)
