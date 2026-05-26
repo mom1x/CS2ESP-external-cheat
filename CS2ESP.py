@@ -24,7 +24,7 @@ dwEntityList, dwLocalPlayerPawn, dwViewMatrix, dwLocalPlayerController, dwViewAn
 m_iTeamNum, m_hPlayerPawn, m_iHealth, m_vecOrigin, m_pGameSceneNode = None, None, None, None, None
 m_modelState, m_entitySpottedState, m_vecViewOffset = None, None, None
 # Смещения для системы наблюдателей
-m_pObserverServices, m_hObserverTarget, m_sSanitizedPlayerName = None, None, None
+m_pObserverServices, m_hObserverTarget, m_sSanitizedPlayerName, m_iObserverMode = None, None, None, None
 
 pm = None
 client = None
@@ -39,7 +39,7 @@ menu_open = True
 cfg_show_hud_stats = True   
 
 # Настройки систем
-cfg_esp_enabled = True      # Глобальный переключатель ВХ (F8)
+cfg_esp_enabled = True      
 cfg_esp_box = True
 cfg_esp_skeleton = True
 cfg_esp_tracers = False
@@ -92,7 +92,7 @@ def load_local_offsets():
     global dwEntityList, dwLocalPlayerPawn, dwViewMatrix, dwLocalPlayerController, dwViewAngles
     global m_iTeamNum, m_hPlayerPawn, m_iHealth, m_pGameSceneNode, m_vecOrigin, m_vecViewOffset
     global m_modelState, m_entitySpottedState, config_status, offsets_loaded
-    global m_pObserverServices, m_hObserverTarget, m_sSanitizedPlayerName
+    global m_pObserverServices, m_hObserverTarget, m_sSanitizedPlayerName, m_iObserverMode
 
     offsets_path = os.path.join("offsets", "offsets.json")
     client_dll_path = os.path.join("offsets", "client_dll.json")
@@ -126,6 +126,7 @@ def load_local_offsets():
         
         m_pObserverServices = dw_classes.get('C_BasePlayerPawn', {}).get('fields', {}).get('m_pObserverServices', None)
         m_hObserverTarget = dw_classes.get('C_PlayerObserverServices', {}).get('fields', {}).get('m_hObserverTarget', None)
+        m_iObserverMode = dw_classes.get('C_PlayerObserverServices', {}).get('fields', {}).get('m_iObserverMode', None)
         m_sSanitizedPlayerName = dw_classes.get('CCSPlayerController', {}).get('fields', {}).get('m_sSanitizedPlayerName', None)
 
         config_status = "MULTIHACK CFG LOADED"
@@ -155,10 +156,8 @@ def async_aimbot_processor():
     
     while True:
         time.sleep(0.001)  
-        
         if not pm or not offsets_loaded or not cfg_aim_enabled:
             continue
-            
         if (win32api.GetAsyncKeyState(0x01) & 0x8000) == 0:
             continue
             
@@ -174,9 +173,7 @@ def async_aimbot_processor():
             if not entity_list: continue
             
             fov_pixels = (cfg_aim_fov * WINDOW_WIDTH) / 180.0
-            
-            best_target_dx = None
-            best_target_dy = None
+            best_target_dx, best_target_dy = None, None
             min_screen_dist = fov_pixels
             
             list_entry = pm.read_longlong(entity_list + 16) 
@@ -225,11 +222,9 @@ def async_aimbot_processor():
                             dx = bone_screen[0] - SCREEN_CENTER_X
                             dy = bone_screen[1] - SCREEN_CENTER_Y
                             dist = math.hypot(dx, dy)
-                            
                             if dist < min_screen_dist:
                                 min_screen_dist = dist
-                                best_target_dx = dx
-                                best_target_dy = dy
+                                best_target_dx, best_target_dy = dx, dy
                 except: continue
                 
             if best_target_dx is not None and best_target_dy is not None:
@@ -255,15 +250,21 @@ def process_visuals_and_sync(draw_list):
         entity_list = pm.read_longlong(client + dwEntityList)
         if not entity_list: return
         
-        local_pawn_handle = 0
+        # 100% Определение индекса локального игрока в списке энтити
+        local_player_slot = -1
         if dwLocalPlayerController:
             local_ctrl = pm.read_longlong(client + dwLocalPlayerController)
             if local_ctrl:
-                local_pawn_handle = pm.read_uint(local_ctrl + m_hPlayerPawn)
+                list_entry_local = pm.read_longlong(entity_list + 16)
+                if list_entry_local:
+                    for s in range(1, 64):
+                        if pm.read_longlong(list_entry_local + 112 * s) == local_ctrl:
+                            local_player_slot = s
+                            break
 
         list_entry = pm.read_longlong(entity_list + 16)
         if list_entry:
-            for slot in range(1, 128):
+            for slot in range(1, 64): # Проверяем основных игроков
                 try:
                     controller = pm.read_longlong(list_entry + 112 * slot)
                     if not controller: continue
@@ -279,36 +280,34 @@ def process_visuals_and_sync(draw_list):
                     entity_pawn = pm.read_longlong(list_entry2 + 112 * pawn_slot)
                     if not entity_pawn: continue
 
+                    # Получение никнейма без мусора
                     s_name = f"Player ({slot})"
                     if m_sSanitizedPlayerName:
                         try:
                             name_ptr = pm.read_longlong(controller + m_sSanitizedPlayerName)
                             if name_ptr:
                                 name_bytes = pm.read_bytes(name_ptr, 64)
-                                s_name = name_bytes.split(b'\x00')[0].decode('utf-8', errors='ignore')
+                                s_name = name_bytes.split(b'\x00')[0].decode('utf-8', errors='ignore').strip()
                         except: pass
 
-                    is_admin = any(tag in s_name.upper() for tag in ['[ADMIN]', '[MOD]', '★', 'OWNER', 'ROOT', 'VIP'])
-                    
-                    if local_pawn_handle and m_pObserverServices and m_hObserverTarget:
+                    # --- 100% АЛГОРИТМ ТРЕКИНГА СПЕКТАТОРОВ ДЛЯ КЛАТЧЕЙ ---
+                    if entity_pawn != local_pawn and m_pObserverServices and m_hObserverTarget:
                         try:
                             obs_services = pm.read_longlong(entity_pawn + m_pObserverServices)
                             if obs_services:
-                                target_handle = pm.read_uint(obs_services + m_hObserverTarget)
-                                if target_handle == local_pawn_handle and entity_pawn != local_pawn:
-                                    display_name = f"[ADMIN] {s_name}" if is_admin else s_name
-                                    if display_name not in current_spectators:
-                                        current_spectators.append(display_name)
-                                elif is_admin:
-                                    display_name = f"[ADMIN] {s_name} (В игре)"
-                                    if display_name not in current_spectators:
-                                        current_spectators.append(display_name)
+                                obs_mode = pm.read_int(obs_services + m_iObserverMode) if m_iObserverMode else 0
+                                # Если игрок в режиме наблюдения (1 = deathcam, 2 = freecam, 4 = chase, 5 = in-eye)
+                                if obs_mode in [1, 2, 4, 5, 6]:
+                                    target_handle = pm.read_uint(obs_services + m_hObserverTarget)
+                                    target_idx = target_handle & 0x1FF # Получаем чистый индекс из хэндла цели
+                                    
+                                    # Жесткое сравнение по индексу слота локального игрока
+                                    if target_idx == local_player_slot and local_player_slot != -1:
+                                        if s_name and s_name not in current_spectators:
+                                            current_spectators.append(s_name)
                         except: pass
 
-                    if not cfg_esp_enabled:
-                        continue
-
-                    if slot > 64: continue
+                    if not cfg_esp_enabled: continue
                     if entity_pawn == local_pawn: continue
                     
                     team = pm.read_int(controller + m_iTeamNum)
@@ -370,8 +369,7 @@ def process_visuals_and_sync(draw_list):
                                 draw_list.add_circle(bone_positions_2d[6][0], bone_positions_2d[6][1], max(2.5, h_diff / 12.0), color, num_segments=16, thickness=1.5)
                 except: continue
     except: pass
-    if cfg_esp_enabled:
-        stats = current_stats
+    if cfg_esp_enabled: stats = current_stats
     spectators_list = current_spectators
 
 def try_connect_game():
@@ -411,7 +409,7 @@ def main():
     style = win32gui.GetWindowLong(hwnd, win32con.GWL_STYLE) & ~(win32con.WS_CAPTION | win32con.WS_THICKFRAME)
     win32gui.SetWindowLong(hwnd, win32con.GWL_STYLE, style)
     
-    win32gui.SetWindowLong(hwnd, win32con.GWL_EXSTYLE, win32con.WS_EX_LAYERED)
+    win32gui.SetWindowLong(hwnd, win32con.WS_EX_LAYERED, win32con.WS_EX_LAYERED)
     update_window_input_state(hwnd, menu_open)
     win32gui.SetWindowPos(hwnd, win32con.HWND_TOPMOST, 0, 0, 0, 0, win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE)
 
@@ -437,17 +435,11 @@ def main():
         if win32api.GetAsyncKeyState(win32con.VK_F5) & 1:
             menu_open = not menu_open
             update_window_input_state(hwnd, menu_open)
-            if not menu_open:
-                force_focus_game()
+            if not menu_open: force_focus_game()
 
-        if win32api.GetAsyncKeyState(win32con.VK_F6) & 1:
-            cfg_show_hud_stats = not cfg_show_hud_stats
-
-        if win32api.GetAsyncKeyState(win32con.VK_F7) & 1:
-            cfg_aim_enabled = not cfg_aim_enabled
-
-        if win32api.GetAsyncKeyState(win32con.VK_F8) & 1:
-            cfg_esp_enabled = not cfg_esp_enabled
+        if win32api.GetAsyncKeyState(win32con.VK_F6) & 1: cfg_show_hud_stats = not cfg_show_hud_stats
+        if win32api.GetAsyncKeyState(win32con.VK_F7) & 1: cfg_aim_enabled = not cfg_aim_enabled
+        if win32api.GetAsyncKeyState(win32con.VK_F8) & 1: cfg_esp_enabled = not cfg_esp_enabled
 
         if not pm and time.time() - last_check > 2.0:
             last_check = time.time()
@@ -469,7 +461,6 @@ def main():
         imgui.set_next_window_size(WINDOW_WIDTH, WINDOW_HEIGHT)
         imgui.set_next_window_position(0, 0)
         imgui.begin("Canvas", flags=imgui.WINDOW_NO_TITLE_BAR | imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_BACKGROUND | imgui.WINDOW_NO_INPUTS)
-        
         imgui.get_window_draw_list().add_text(15, WINDOW_HEIGHT - 45, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 0.4), "[F5] Menu  |  [F6] HUD Widgets  |  [F7] Toggle Aim  |  [F8] Toggle ESP")
         
         if offsets_loaded and pm: 
@@ -481,7 +472,6 @@ def main():
 
         # Виджеты HUD справа
         if cfg_show_hud_stats:
-            # Динамический расчет высоты виджета под количество наблюдателей
             spec_count = len(spectators_list)
             base_height = 140
             spec_element_height = (spec_count * 20) + 25 if spec_count > 0 else 0
@@ -502,22 +492,19 @@ def main():
             imgui.set_cursor_pos((12, 10))
             imgui.text_colored("BLOODHUD SYSTEM", 0.9, 0.0, 0.0, 1.0)
             
-            # Новая вставка: Количество наблюдателей и их ники под названием
+            # Количество наблюдателей под BLOODHUD SYSTEM
             imgui.set_cursor_pos((12, 30))
             imgui.text_colored(f"Spectated Players: {spec_count}", 1.0, 1.0, 1.0, 1.0)
             
+            # Вывод ников
             for spec_name in spectators_list:
                 imgui.set_cursor_pos((12, imgui.get_cursor_pos().y + 2))
-                if "[ADMIN]" in spec_name:
-                    imgui.text_colored(f"> {spec_name}", 1.0, 0.3, 0.3, 1.0)  # Админы ярко-красным
-                else:
-                    imgui.text_colored(f"> {spec_name}", 0.85, 0.85, 0.85, 1.0) # Обычные спеки
+                imgui.text_colored(f"> {spec_name}", 0.85, 0.85, 0.85, 1.0) 
             
             imgui.spacing()
             imgui.separator()
             imgui.spacing()
             
-            # Статусы систем
             g_color = [0.0, 1.0, 0.2, 1.0] if game_status == "CONNECTED" else [0.8, 0.1, 0.1, 1.0]
             imgui.text("Link Status: ")
             imgui.same_line()
