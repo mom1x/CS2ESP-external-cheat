@@ -11,7 +11,7 @@ import OpenGL.GL as gl
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(2)
 except:
-    try: ctypes.windll.user32.SetProcessDPIAware()
+    try: ctypes.windll.setProcessDPIAware()
     except: pass
 
 WINDOW_WIDTH = win32api.GetSystemMetrics(0)
@@ -35,7 +35,7 @@ stats = {"enemies": 0, "visible": 0}
 spectators_list = []
 local_idx_global = -1
 
-menu_open = True            
+menu_open = True     
 cfg_show_hud_stats = True   
 
 # Настройки систем
@@ -282,7 +282,19 @@ def process_visuals_and_sync(draw_list):
                     entity_pawn = pm.read_longlong(list_entry2 + 112 * pawn_slot)
                     if not entity_pawn: continue
 
-                    # --- ИСПРАВЛЕННАЯ И НАДЕЖНАЯ ЛОГИКА НАБЛЮДАТЕЛЕЙ ---
+                    # Чтение никнейма игрока
+                    s_name = f"Player ({slot})"
+                    if m_sSanitizedPlayerName:
+                        try:
+                            name_ptr = pm.read_longlong(controller + m_sSanitizedPlayerName)
+                            if name_ptr:
+                                name_bytes = pm.read_bytes(name_ptr, 64)
+                                s_name = name_bytes.split(b'\x00')[0].decode('utf-8', errors='ignore')
+                        except: pass
+
+                    # --- ИСПРАВЛЕННАЯ И НАДЕЖНАЯ ЛОГИКА НАБЛЮДАТЕЛЕЙ + АДМИН ДЕТЕКТОР ---
+                    is_admin = any(tag in s_name.upper() for tag in ['[ADMIN]', '[MOD]', '★', 'OWNER', 'ROOT', 'VIP'])
+                    
                     if local_pawn_handle and m_pObserverServices and m_hObserverTarget:
                         try:
                             obs_services = pm.read_longlong(entity_pawn + m_pObserverServices)
@@ -290,15 +302,14 @@ def process_visuals_and_sync(draw_list):
                                 target_handle = pm.read_uint(obs_services + m_hObserverTarget)
                                 # Проверяем, совпадает ли цель наблюдения с нашим хэндлом
                                 if target_handle == local_pawn_handle and entity_pawn != local_pawn:
-                                    name_ptr = pm.read_longlong(controller + m_sSanitizedPlayerName)
-                                    if name_ptr:
-                                        name_bytes = pm.read_bytes(name_ptr, 64)
-                                        s_name = name_bytes.split(b'\x00')[0].decode('utf-8', errors='ignore')
-                                    else:
-                                        s_name = f"Player ({slot})"
-                                        
-                                    if s_name and s_name not in current_spectators:
-                                        current_spectators.append(s_name)
+                                    display_name = f"[ADMIN] {s_name}" if is_admin else s_name
+                                    if display_name not in current_spectators:
+                                        current_spectators.append(display_name)
+                                elif is_admin:
+                                    # Если это админ, но он не в спеках за нами, всё равно выводим предупреждение в список
+                                    display_name = f"[ADMIN] {s_name} (В игре)"
+                                    if display_name not in current_spectators:
+                                        current_spectators.append(display_name)
                         except: pass
 
                     # Если F8 выключил отображение, то визуалы не рисуем, но сбор спектаторов выше все равно сработал!
@@ -515,7 +526,7 @@ def main():
             imgui.text(f"Targets Tracked: {stats['enemies'] if cfg_esp_enabled else 0}")
             imgui.end()
 
-            # 2. Выровненный по правому краю список наблюдателей
+            # 2. Выровненный по правому краю список наблюдателей и администраторов
             if spectators_list:
                 imgui.set_next_window_position(WINDOW_WIDTH - 240, 195, condition=imgui.ALWAYS)
                 imgui.set_next_window_size(220, 35 + len(spectators_list) * 20)
@@ -528,12 +539,15 @@ def main():
                 sdl.add_rect(spos.x, spos.y, spos.x + ssize.x, spos.y + ssize.y, imgui.get_color_u32_rgba(0.8, 0.0, 0.0, 0.85), rounding=5.0, thickness=1.5)
                 
                 imgui.set_cursor_pos((12, 8))
-                imgui.text_colored("WATCHING YOU:", 1.0, 0.1, 0.1, 1.0)
+                imgui.text_colored("MONITORING LIST:", 1.0, 0.1, 0.1, 1.0)
                 imgui.separator()
                 
                 for spec_name in spectators_list:
                     imgui.set_cursor_pos((12, imgui.get_cursor_pos().y + 2))
-                    imgui.text_colored(f"👁 {spec_name}", 0.95, 0.95, 0.95, 1.0)
+                    if "[ADMIN]" in spec_name:
+                        imgui.text_colored(spec_name, 1.0, 0.3, 0.3, 1.0)  # Подсвечиваем админов ярко-красным
+                    else:
+                        imgui.text_colored(f"👁 {spec_name}", 0.95, 0.95, 0.95, 1.0)
                 imgui.end()
 
         if menu_open:
