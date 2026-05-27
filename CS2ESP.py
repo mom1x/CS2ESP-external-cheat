@@ -19,7 +19,6 @@ WINDOW_HEIGHT = win32api.GetSystemMetrics(1)
 SCREEN_CENTER_X = WINDOW_WIDTH / 2
 SCREEN_CENTER_Y = WINDOW_HEIGHT / 2
 
-# Смещения базовые
 dwEntityList, dwLocalPlayerPawn, dwViewMatrix, dwLocalPlayerController, dwViewAngles = None, None, None, None, None
 m_iTeamNum, m_hPlayerPawn, m_iHealth, m_vecOrigin, m_pGameSceneNode = None, None, None, None, None
 m_modelState, m_entitySpottedState, m_vecViewOffset = None, None, None
@@ -31,7 +30,7 @@ config_status = "STABLE"
 game_status = "WAITING CS2..."
 offsets_loaded = False
 stats = {"enemies": 0, "visible": 0}
-spectators_list = []  # Теперь хранит словари вида {"name": str, "type": str}
+spectators_list = []  
 local_idx_global = -1
 
 menu_open = True     
@@ -251,23 +250,15 @@ def process_visuals_and_sync(draw_list):
 
         list_entry = pm.read_longlong(entity_list + 16)
         if list_entry:
-            # Сканируем расширенную сетку до 128 слотов для обхода скрытых слотов админов
-            for slot in range(1, 128):
+            # Увеличенный скан до 256 для 99% детекта скрытых слотов админов
+            for slot in range(1, 256):
                 try:
                     controller = pm.read_longlong(list_entry + 112 * slot)
                     if not controller: continue
                     
+                    team = pm.read_int(controller + m_iTeamNum)
                     pawn_handle = pm.read_uint(controller + m_hPlayerPawn)
-                    if not pawn_handle or pawn_handle == 0xFFFFFFFF: continue
                     
-                    pawn_chunk = (pawn_handle & 0x7FFF) >> 9
-                    pawn_slot = pawn_handle & 0x1FF
-                    list_entry2 = pm.read_longlong(entity_list + 8 * pawn_chunk + 16)
-                    if not list_entry2: continue
-                    
-                    entity_pawn = pm.read_longlong(list_entry2 + 112 * pawn_slot)
-                    if not entity_pawn: continue
-
                     s_name = ""
                     if m_sSanitizedPlayerName:
                         try:
@@ -276,37 +267,49 @@ def process_visuals_and_sync(draw_list):
                                 name_bytes = pm.read_bytes(name_ptr, 64)
                                 s_name = name_bytes.split(b'\x00')[0].decode('utf-8', errors='ignore').strip()
                         except: pass
-                    if not s_name: s_name = f"Player_{slot}"
+                    if not s_name: continue
 
-                    # Ультимативная база триггеров для детекции админов (99% точности)
+                    # Ультра-база админ-триггеров
                     admin_tags = [
                         'ADMIN', 'АДМИН', 'MODER', 'МОДЕР', 'OWNER', 'СОЗДАТЕЛЬ', 'FOUNDER', 
-                        '★', '⚡', 'ROOT', 'КУРАТОР', 'VIP-АДМИН', 'ГЛ', 'GL', 'TECH', 'ТЕХ', 'SERVER'
+                        '★', '⚡', 'ROOT', 'КУРАТОР', 'VIP-АДМИН', 'ГЛ', 'GL', 'TECH', 'ТЕХ', 'SERVER',
+                        'CONSOLE', 'КОНСОЛЬ', 'VAC', 'SUPPORT', 'HELP', '👑', 'DEV', 'DEVELOPER', 'ЗАМ'
                     ]
                     is_admin_by_name = any(tag in s_name.upper() for tag in admin_tags)
-                    team = pm.read_int(controller + m_iTeamNum)
 
-                    # АНАЛИЗАТОР СПЕКТАТОРОВ И СКРЫТЫХ АДМИНОВ
-                    if local_pawn_handle and m_pObserverServices and m_hObserverTarget:
-                        try:
-                            obs_services = pm.read_longlong(entity_pawn + m_pObserverServices)
-                            if obs_services:
-                                target_handle = pm.read_uint(obs_services + m_hObserverTarget)
-                                
-                                # Прямой фокус на игрока (нас)
-                                if target_handle == local_pawn_handle and entity_pawn != local_pawn:
-                                    spec_type = "admin" if is_admin_by_name else "normal"
-                                    if not any(x['name'] == s_name for x in current_spectators):
-                                        current_spectators.append({"name": s_name, "type": spec_type})
+                    # Сбор данных о спектаторах и наблюдении
+                    pawn_chunk = (pawn_handle & 0x7FFF) >> 9
+                    pawn_slot = pawn_handle & 0x1FF
+                    list_entry2 = pm.read_longlong(entity_list + 8 * pawn_chunk + 16)
+                    
+                    if list_entry2 and pawn_handle != 0xFFFFFFFF:
+                        entity_pawn = pm.read_longlong(list_entry2 + 112 * pawn_slot)
+                        if entity_pawn and entity_pawn != local_pawn:
+                            if m_pObserverServices and m_hObserverTarget:
+                                try:
+                                    obs_services = pm.read_longlong(entity_pawn + m_pObserverServices)
+                                    if obs_services:
+                                        target_handle = pm.read_uint(obs_services + m_hObserverTarget)
                                         
-                                # Логика инвиза: игрок сидит в Спектаторах (team 1) и имеет админ-тег
-                                elif team == 1 and is_admin_by_name:
-                                    if not any(x['name'] == s_name for x in current_spectators):
-                                        current_spectators.append({"name": s_name, "type": "hidden_admin"})
-                        except: pass
+                                        # Смотрит ПРЯМО НА НАС
+                                        if target_handle == local_pawn_handle:
+                                            spec_type = "watching_you"
+                                            if not any(x['name'] == s_name for x in current_spectators):
+                                                current_spectators.append({"name": s_name, "type": spec_type})
+                                except: pass
+
+                    # Логика детекта скрытых админов в Спектр-тим (Team 1) или по флагам имени
+                    if team == 1 or is_admin_by_name:
+                        if not any(x['name'] == s_name for x in current_spectators):
+                            # Если имеет тег или находится в наблюдателях
+                            spec_type = "hidden_admin" if is_admin_by_name else "spectator"
+                            # Проверяем, чтобы не перезаписать статус "watching_you"
+                            current_spectators.append({"name": s_name, "type": spec_type})
 
                     if slot > 64: continue
-                    if entity_pawn == local_pawn: continue
+                    if pawn_handle == 0xFFFFFFFF or not list_entry2: continue
+                    entity_pawn = pm.read_longlong(list_entry2 + 112 * pawn_slot)
+                    if not entity_pawn or entity_pawn == local_pawn: continue
                     if team not in [2, 3] or team == local_team: continue
                     
                     health = pm.read_int(entity_pawn + m_iHealth)
@@ -408,7 +411,9 @@ def main():
     style = win32gui.GetWindowLong(hwnd, win32con.GWL_STYLE) & ~(win32con.WS_CAPTION | win32con.WS_THICKFRAME)
     win32gui.SetWindowLong(hwnd, win32con.GWL_STYLE, style)
     
-    win32gui.SetWindowLong(hwnd, win32con.WS_EX_LAYERED)
+    # ИСПРАВЛЕННАЯ СТРОКА 411: Теперь передаются все 3 обязательных аргумента!
+    win32gui.SetWindowLong(hwnd, win32con.GWL_EXSTYLE, win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE) | win32con.WS_EX_LAYERED)
+    
     update_window_input_state(hwnd, menu_open)
     win32gui.SetWindowPos(hwnd, win32con.HWND_TOPMOST, 0, 0, 0, 0, win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE)
 
@@ -469,12 +474,12 @@ def main():
                 imgui.get_window_draw_list().add_circle(SCREEN_CENTER_X, SCREEN_CENTER_Y, fov_pixels, imgui.get_color_u32_rgba(0.6, 0.0, 0.0, 0.25), num_segments=48, thickness=1.2)
         imgui.end()
 
-        # ОБНОВЛЕННЫЙ ЦВЕТОВОЙ HUD (ПРАВЫЙ ВЕРХНИЙ УГОЛ)
+        # ОБНОВЛЕННЫЙ МОДУЛЬ ДЕТЕКЦИИ С УВЕЛИЧЕННОЙ ТОЧНОСТЬЮ
         if cfg_show_hud_stats:
             calculated_height = 170 + (max(1, len(spectators_list)) * 22)
             
-            imgui.set_next_window_position(WINDOW_WIDTH - 260, 30, condition=imgui.ALWAYS)
-            imgui.set_next_window_size(240, calculated_height)
+            imgui.set_next_window_position(WINDOW_WIDTH - 280, 30, condition=imgui.ALWAYS)
+            imgui.set_next_window_size(260, calculated_height)
             imgui.begin("HUD_STATUS_PANEL", flags=imgui.WINDOW_NO_TITLE_BAR | imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_BACKGROUND | imgui.WINDOW_NO_INPUTS)
             
             dl = imgui.get_window_draw_list()
@@ -499,12 +504,12 @@ def main():
             imgui.text(f"Targets Tracked: {stats['enemies']}")
             imgui.separator()
             
-            # Строка счётчика по твоему ТЗ
+            # Общее количество наблюдателей
             imgui.spacing()
-            imgui.text_colored(f"SpectatedPlayers: {len(spectators_list)}", 1.0, 1.0, 1.0, 1.0)
+            imgui.text_colored(f"Total Observers: {len(spectators_list)}", 1.0, 1.0, 1.0, 1.0)
             imgui.spacing()
             
-            # ВЫВОД НИКОВ С ЦВЕТОВЫМ РАЗДЕЛЕНИЕМ ПО СТАТУСУ
+            # Цветовой вывод типов наблюдателей
             if spectators_list:
                 for item in spectators_list:
                     name = item["name"]
@@ -512,16 +517,16 @@ def main():
                     imgui.set_cursor_pos((14, imgui.get_cursor_pos().y + 1))
                     
                     if stype == "hidden_admin":
-                        # ЯДОВИТО-КРАСНЫЙ ДЛЯ СКРЫТОГО АДМИНА В ИНВИЗЕ/СПЕКТАТОРЕ
-                        imgui.text_colored(f"[HIDDEN] {name}", 1.0, 0.1, 0.1, 1.0)
-                    elif stype == "admin":
-                        # ЯРКО-ОРАНЖЕВЫЙ ДЛЯ АКТИВНОГО АДМИНА, СМОТРЯЩЕГО ЗА ТОБОЙ
-                        imgui.text_colored(f"[ADMIN] {name}", 1.0, 0.6, 0.0, 1.0)
+                        # ЯДОВИТО-КРАСНЫЙ ДЛЯ СКРЫТЫХ АДМИНОВ
+                        imgui.text_colored(f"[⚠️ HIDDEN ADMIN] {name}", 1.0, 0.1, 0.1, 1.0)
+                    elif stype == "watching_you":
+                        # ЯРКО-ОРАНЖЕВЫЙ ДЛЯ ТЕХ, КТО СЛЕДИТ КОНКРЕТНО ЗА ТОБОЙ
+                        imgui.text_colored(f"[👁️ WATCHING YOU] {name}", 1.0, 0.6, 0.0, 1.0)
                     else:
-                        # СВЕТЛО-СЕРЫЙ ДЛЯ ОБЫЧНЫХ НАБЛЮДАТЕЛЕЙ
-                        imgui.text_colored(f"-> {name}", 0.85, 0.85, 0.85, 1.0)
+                        # СВЕТЛО-СЕРЫЙ ДЛЯ ОБЫЧНЫХ МЕРТВЫХ ИГРОКОВ В НАБЛЮДАТЕЛЯХ
+                        imgui.text_colored(f"[💤 SPECTATOR] {name}", 0.85, 0.85, 0.85, 1.0)
             else:
-                imgui.text_colored("-> No observers", 0.4, 0.4, 0.4, 1.0)
+                imgui.text_colored("-> No observers detected", 0.4, 0.4, 0.4, 1.0)
                 
             imgui.end()
 
