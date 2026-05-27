@@ -35,7 +35,6 @@ local_idx_global = -1
 
 menu_open = True     
 cfg_show_hud_stats = True   
-
 cfg_esp_enabled = True      
 cfg_esp_box = True
 cfg_esp_skeleton = True
@@ -147,6 +146,80 @@ def get_bone_position(pm, bone_array, bone_index):
         return [bx, by, bz]
     except: return None
 
+# АСИНХРОННЫЙ ВЫДЕЛЕННЫЙ ПОТОК ДЛЯ СКАНИРОВАНИЯ НАБЛЮДАТЕЛЕЙ (0% НАГРУЗКИ НА КАРТИНКУ)
+def async_spectator_scanner():
+    global spectators_list, pm, client, offsets_loaded
+    while True:
+        time.sleep(0.25)  # Опрос 4 раза в секунду — оптимально, точно и без единого фриза
+        if not pm or not offsets_loaded: continue
+        
+        try:
+            local_ctrl = pm.read_longlong(client + dwLocalPlayerController)
+            if not local_ctrl: continue
+            
+            local_pawn_handle = pm.read_uint(local_ctrl + m_hPlayerPawn)
+            if not local_pawn_handle or local_pawn_handle == 0xFFFFFFFF: continue
+            local_pawn_slot = local_pawn_handle & 0x7FFF
+            
+            entity_list = pm.read_longlong(client + dwEntityList)
+            if not entity_list: continue
+            
+            list_entry = pm.read_longlong(entity_list + 16)
+            if not list_entry: continue
+            
+            temp_specs = []
+            admin_tags = [
+                'ADMIN', 'АДМИН', 'MODER', 'МОДЕР', 'OWNER', 'СОЗДАТЕЛЬ', 'FOUNDER', 
+                '★', '⚡', 'ROOT', 'VIP', 'ГЛ', 'GL', '👑', 'DEV', 'DEVELOPER'
+            ]
+
+            # Сканируем расширенную сетку слотов для полной стабильности на любых серверах
+            for slot in range(1, 128):
+                try:
+                    controller = pm.read_longlong(list_entry + 112 * slot)
+                    if not controller: continue
+                    
+                    team = pm.read_int(controller + m_iTeamNum)
+                    pawn_handle = pm.read_uint(controller + m_hPlayerPawn)
+                    if pawn_handle == 0xFFFFFFFF: continue
+                    
+                    s_name = ""
+                    if m_sSanitizedPlayerName:
+                        name_ptr = pm.read_longlong(controller + m_sSanitizedPlayerName)
+                        if name_ptr:
+                            name_bytes = pm.read_bytes(name_ptr, 64)
+                            s_name = name_bytes.split(b'\x00')[0].decode('utf-8', errors='ignore').strip()
+                    if not s_name: continue
+
+                    if any(x['name'] == s_name for x in temp_specs): continue
+                    is_admin_by_name = any(tag in s_name.upper() for tag in admin_tags)
+
+                    pawn_chunk = (pawn_handle & 0x7FFF) >> 9
+                    pawn_slot = pawn_handle & 0x1FF
+                    list_entry2 = pm.read_longlong(entity_list + 8 * pawn_chunk + 16)
+                    if not list_entry2: continue
+                    
+                    entity_pawn = pm.read_longlong(list_entry2 + 112 * pawn_slot)
+                    if not entity_pawn: continue
+                    
+                    if m_pObserverServices and m_hObserverTarget:
+                        obs_services = pm.read_longlong(entity_pawn + m_pObserverServices)
+                        if obs_services:
+                            target_handle = pm.read_uint(obs_services + m_hObserverTarget)
+                            target_pawn_slot = target_handle & 0x7FFF
+                            
+                            # Если цель наблюдения совпала с хэндлом твоего павна в клатче
+                            if target_pawn_slot == local_pawn_slot:
+                                temp_specs.append({"name": s_name, "type": "watching_you", "is_admin": is_admin_by_name})
+                                continue
+
+                    if team == 1 and is_admin_by_name:
+                        temp_specs.append({"name": s_name, "type": "hidden_admin", "is_admin": True})
+                except: continue
+                
+            spectators_list = temp_specs
+        except: pass
+
 def async_aimbot_processor():
     global pm, client, offsets_loaded, cfg_aim_enabled, cfg_aim_fov, cfg_aim_smooth, cfg_aim_bone, cfg_aim_ignore_visibility, local_idx_global
     
@@ -225,13 +298,11 @@ def async_aimbot_processor():
                 win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, int(move_x), int(move_y), 0, 0)
         except: pass
 
-def process_visuals_and_sync(draw_list):
-    global stats, local_idx_global, spectators_list, cfg_esp_enabled
-    if not pm or not offsets_loaded: return
+def process_visuals_only(draw_list):
+    global stats, local_idx_global, cfg_esp_enabled
+    if not pm or not offsets_loaded or not cfg_esp_enabled: return
     
     current_stats = {"enemies": 0, "visible": 0}
-    current_spectators = []
-    
     try:
         v_buff = pm.read_bytes(client + dwViewMatrix, 64)
         view_matrix = struct.unpack('16f', v_buff)
@@ -242,72 +313,22 @@ def process_visuals_and_sync(draw_list):
         entity_list = pm.read_longlong(client + dwEntityList)
         if not entity_list: return
         
-        local_pawn_handle = 0
-        if dwLocalPlayerController:
-            local_ctrl = pm.read_longlong(client + dwLocalPlayerController)
-            if local_ctrl:
-                local_pawn_handle = pm.read_uint(local_ctrl + m_hPlayerPawn)
-
         list_entry = pm.read_longlong(entity_list + 16)
         if list_entry:
-            # Увеличенный скан до 256 для 99% детекта скрытых слотов админов
-            for slot in range(1, 256):
+            for slot in range(1, 64):
                 try:
                     controller = pm.read_longlong(list_entry + 112 * slot)
                     if not controller: continue
                     
                     team = pm.read_int(controller + m_iTeamNum)
                     pawn_handle = pm.read_uint(controller + m_hPlayerPawn)
+                    if pawn_handle == 0xFFFFFFFF: continue
                     
-                    s_name = ""
-                    if m_sSanitizedPlayerName:
-                        try:
-                            name_ptr = pm.read_longlong(controller + m_sSanitizedPlayerName)
-                            if name_ptr:
-                                name_bytes = pm.read_bytes(name_ptr, 64)
-                                s_name = name_bytes.split(b'\x00')[0].decode('utf-8', errors='ignore').strip()
-                        except: pass
-                    if not s_name: continue
-
-                    # Ультра-база админ-триггеров
-                    admin_tags = [
-                        'ADMIN', 'АДМИН', 'MODER', 'МОДЕР', 'OWNER', 'СОЗДАТЕЛЬ', 'FOUNDER', 
-                        '★', '⚡', 'ROOT', 'КУРАТОР', 'VIP-АДМИН', 'ГЛ', 'GL', 'TECH', 'ТЕХ', 'SERVER',
-                        'CONSOLE', 'КОНСОЛЬ', 'VAC', 'SUPPORT', 'HELP', '👑', 'DEV', 'DEVELOPER', 'ЗАМ'
-                    ]
-                    is_admin_by_name = any(tag in s_name.upper() for tag in admin_tags)
-
-                    # Сбор данных о спектаторах и наблюдении
                     pawn_chunk = (pawn_handle & 0x7FFF) >> 9
                     pawn_slot = pawn_handle & 0x1FF
                     list_entry2 = pm.read_longlong(entity_list + 8 * pawn_chunk + 16)
+                    if not list_entry2: continue
                     
-                    if list_entry2 and pawn_handle != 0xFFFFFFFF:
-                        entity_pawn = pm.read_longlong(list_entry2 + 112 * pawn_slot)
-                        if entity_pawn and entity_pawn != local_pawn:
-                            if m_pObserverServices and m_hObserverTarget:
-                                try:
-                                    obs_services = pm.read_longlong(entity_pawn + m_pObserverServices)
-                                    if obs_services:
-                                        target_handle = pm.read_uint(obs_services + m_hObserverTarget)
-                                        
-                                        # Смотрит ПРЯМО НА НАС
-                                        if target_handle == local_pawn_handle:
-                                            spec_type = "watching_you"
-                                            if not any(x['name'] == s_name for x in current_spectators):
-                                                current_spectators.append({"name": s_name, "type": spec_type})
-                                except: pass
-
-                    # Логика детекта скрытых админов в Спектр-тим (Team 1) или по флагам имени
-                    if team == 1 or is_admin_by_name:
-                        if not any(x['name'] == s_name for x in current_spectators):
-                            # Если имеет тег или находится в наблюдателях
-                            spec_type = "hidden_admin" if is_admin_by_name else "spectator"
-                            # Проверяем, чтобы не перезаписать статус "watching_you"
-                            current_spectators.append({"name": s_name, "type": spec_type})
-
-                    if slot > 64: continue
-                    if pawn_handle == 0xFFFFFFFF or not list_entry2: continue
                     entity_pawn = pm.read_longlong(list_entry2 + 112 * pawn_slot)
                     if not entity_pawn or entity_pawn == local_pawn: continue
                     if team not in [2, 3] or team == local_team: continue
@@ -316,7 +337,6 @@ def process_visuals_and_sync(draw_list):
                     if health <= 0 or health > 200: continue
                     
                     current_stats["enemies"] += 1
-                    
                     is_spotted = False
                     if local_idx_global != -1 and m_entitySpottedState:
                         slot_idx = local_idx_global - 1
@@ -326,53 +346,49 @@ def process_visuals_and_sync(draw_list):
                         
                     if is_spotted: current_stats["visible"] += 1
                     
-                    if cfg_esp_enabled:
-                        game_scene = pm.read_longlong(entity_pawn + m_pGameSceneNode)
-                        f_bytes = pm.read_bytes(game_scene + m_vecOrigin, 12)
-                        fx, fy, fz = struct.unpack('fff', f_bytes)
+                    game_scene = pm.read_longlong(entity_pawn + m_pGameSceneNode)
+                    f_bytes = pm.read_bytes(game_scene + m_vecOrigin, 12)
+                    fx, fy, fz = struct.unpack('fff', f_bytes)
+                    
+                    head_screen = w2s(view_matrix, fx, fy, fz + 73.0)
+                    leg_screen = w2s(view_matrix, fx, fy, fz)
+                    if not head_screen or not leg_screen: continue
+                    
+                    color = imgui.get_color_u32_rgba(0.0, 1.0, 0.2, 0.95) if is_spotted else imgui.get_color_u32_rgba(0.55, 0.0, 0.0, 0.85)
+                    h_diff = abs(head_screen[1] - leg_screen[1])
+                    w_diff = h_diff / 1.8
+                    l_x, r_x = head_screen[0] - (w_diff / 2.0), head_screen[0] + (w_diff / 2.0)
+                    
+                    if cfg_esp_box:
+                        draw_list.add_rect(l_x, head_screen[1], r_x, leg_screen[1], color, rounding=1.0, thickness=1.5)
+                    if cfg_esp_tracers:
+                        draw_list.add_line(SCREEN_CENTER_X, WINDOW_HEIGHT, leg_screen[0], leg_screen[1], color, 1.0)
                         
-                        head_screen = w2s(view_matrix, fx, fy, fz + 73.0)
-                        leg_screen = w2s(view_matrix, fx, fy, fz)
-                        if not head_screen or not leg_screen: continue
-                        
-                        color = imgui.get_color_u32_rgba(0.0, 1.0, 0.2, 0.95) if is_spotted else imgui.get_color_u32_rgba(0.55, 0.0, 0.0, 0.85)
-                        h_diff = abs(head_screen[1] - leg_screen[1])
-                        w_diff = h_diff / 1.8
-                        l_x, r_x = head_screen[0] - (w_diff / 2.0), head_screen[0] + (w_diff / 2.0)
-                        
-                        if cfg_esp_box:
-                            draw_list.add_rect(l_x, head_screen[1], r_x, leg_screen[1], color, rounding=1.0, thickness=1.5)
-                        if cfg_esp_tracers:
-                            draw_list.add_line(SCREEN_CENTER_X, WINDOW_HEIGHT, leg_screen[0], leg_screen[1], color, 1.0)
-                            
-                        bar_x = l_x - 6
-                        draw_list.add_rect_filled(bar_x - 1, head_screen[1], bar_x + 2, leg_screen[1], imgui.get_color_u32_rgba(0.02, 0.02, 0.02, 0.6))
-                        health_perc = max(0, min(100, health)) / 100.0
-                        draw_list.add_rect_filled(bar_x - 1, leg_screen[1] - (h_diff * health_perc), bar_x + 2, leg_screen[1], imgui.get_color_u32_rgba(0.3 + (health_perc * 0.7), 0.1, 0.1, 1.0))
-                        
-                        if cfg_esp_skeleton:
-                            skeleton_address = game_scene + m_modelState
-                            bone_array = pm.read_longlong(skeleton_address + 0x80)
-                            if bone_array:
-                                bone_positions_2d = {}
-                                for bone_id in set([6] + [b for conn in BONE_CONNECTIONS for b in conn]):
-                                    b_pos_3d = get_bone_position(pm, bone_array, bone_id)
-                                    if b_pos_3d:
-                                        b_pos_2d = w2s(view_matrix, b_pos_3d[0], b_pos_3d[1], b_pos_3d[2])
-                                        if b_pos_2d: bone_positions_2d[bone_id] = b_pos_2d
-                                for conn in BONE_CONNECTIONS:
-                                    if conn[0] in bone_positions_2d and conn[1] in bone_positions_2d:
-                                        p1, p2 = bone_positions_2d[conn[0]], bone_positions_2d[conn[1]]
-                                        if math.hypot(p1[0]-p2[0], p1[1]-p2[1]) < h_diff * 1.5:
-                                            draw_list.add_line(p1[0], p1[1], p2[0], p2[1], imgui.get_color_u32_rgba(0.9, 0.9, 0.9, 0.75), 1.3)
-                                if 6 in bone_positions_2d:
-                                    draw_list.add_circle(bone_positions_2d[6][0], bone_positions_2d[6][1], max(2.5, h_diff / 12.0), color, num_segments=16, thickness=1.5)
+                    bar_x = l_x - 6
+                    draw_list.add_rect_filled(bar_x - 1, head_screen[1], bar_x + 2, leg_screen[1], imgui.get_color_u32_rgba(0.02, 0.02, 0.02, 0.6))
+                    health_perc = max(0, min(100, health)) / 100.0
+                    draw_list.add_rect_filled(bar_x - 1, leg_screen[1] - (h_diff * health_perc), bar_x + 2, leg_screen[1], imgui.get_color_u32_rgba(0.3 + (health_perc * 0.7), 0.1, 0.1, 1.0))
+                    
+                    if cfg_esp_skeleton:
+                        skeleton_address = game_scene + m_modelState
+                        bone_array = pm.read_longlong(skeleton_address + 0x80)
+                        if bone_array:
+                            bone_positions_2d = {}
+                            for bone_id in set([6] + [b for conn in BONE_CONNECTIONS for b in conn]):
+                                b_pos_3d = get_bone_position(pm, bone_array, bone_id)
+                                if b_pos_3d:
+                                    b_pos_2d = w2s(view_matrix, b_pos_3d[0], b_pos_3d[1], b_pos_3d[2])
+                                    if b_pos_2d: bone_positions_2d[bone_id] = b_pos_2d
+                            for conn in BONE_CONNECTIONS:
+                                if conn[0] in bone_positions_2d and conn[1] in bone_positions_2d:
+                                    p1, p2 = bone_positions_2d[conn[0]], bone_positions_2d[conn[1]]
+                                    if math.hypot(p1[0]-p2[0], p1[1]-p2[1]) < h_diff * 1.5:
+                                        draw_list.add_line(p1[0], p1[1], p2[0], p2[1], imgui.get_color_u32_rgba(0.9, 0.9, 0.9, 0.75), 1.3)
+                            if 6 in bone_positions_2d:
+                                draw_list.add_circle(bone_positions_2d[6][0], bone_positions_2d[6][1], max(2.5, h_diff / 12.0), color, num_segments=16, thickness=1.5)
                 except: continue
+        stats = current_stats
     except: pass
-    
-    if cfg_esp_enabled: stats = current_stats
-    else: stats = {"enemies": 0, "visible": 0}
-    spectators_list = current_spectators
 
 def try_connect_game():
     global pm, client, game_status
@@ -411,7 +427,6 @@ def main():
     style = win32gui.GetWindowLong(hwnd, win32con.GWL_STYLE) & ~(win32con.WS_CAPTION | win32con.WS_THICKFRAME)
     win32gui.SetWindowLong(hwnd, win32con.GWL_STYLE, style)
     
-    # ИСПРАВЛЕННАЯ СТРОКА 411: Теперь передаются все 3 обязательных аргумента!
     win32gui.SetWindowLong(hwnd, win32con.GWL_EXSTYLE, win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE) | win32con.WS_EX_LAYERED)
     
     update_window_input_state(hwnd, menu_open)
@@ -425,8 +440,13 @@ def main():
     impl = GlfwRenderer(window)
     load_local_offsets()
     
+    # Поток аимбота
     aim_thread = threading.Thread(target=async_aimbot_processor, daemon=True)
     aim_thread.start()
+
+    # Поток улучшенного сканера наблюдателей
+    spec_thread = threading.Thread(target=async_spectator_scanner, daemon=True)
+    spec_thread.start()
     
     last_check = 0
     last_local_idx_check = 0
@@ -449,7 +469,7 @@ def main():
             last_check = time.time()
             try_connect_game()
 
-        if pm and offsets_loaded and (time.time() - last_local_idx_check > 1.5):
+        if pm and offsets_loaded and (time.time() - last_local_idx_check > 2.0):
             last_local_idx_check = time.time()
             try:
                 local_ctrl = pm.read_longlong(client + dwLocalPlayerController)
@@ -462,34 +482,39 @@ def main():
                             break
             except: pass
 
+        # Задний холст под ESP
         imgui.set_next_window_size(WINDOW_WIDTH, WINDOW_HEIGHT)
         imgui.set_next_window_position(0, 0)
         imgui.begin("Canvas", flags=imgui.WINDOW_NO_TITLE_BAR | imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_BACKGROUND | imgui.WINDOW_NO_INPUTS)
         imgui.get_window_draw_list().add_text(15, WINDOW_HEIGHT - 45, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 0.4), "[F5] Menu  |  [F6] HUD Widgets  |  [F7] Toggle Aim  |  [ALT] Toggle ESP")
         
         if offsets_loaded and pm: 
-            process_visuals_and_sync(imgui.get_window_draw_list())
+            process_visuals_only(imgui.get_window_draw_list())
             if cfg_aim_enabled:
                 fov_pixels = (cfg_aim_fov * WINDOW_WIDTH) / 180.0
                 imgui.get_window_draw_list().add_circle(SCREEN_CENTER_X, SCREEN_CENTER_Y, fov_pixels, imgui.get_color_u32_rgba(0.6, 0.0, 0.0, 0.25), num_segments=48, thickness=1.2)
         imgui.end()
 
-        # ОБНОВЛЕННЫЙ МОДУЛЬ ДЕТЕКЦИИ С УВЕЛИЧЕННОЙ ТОЧНОСТЬЮ
+        # ЖЕСТКО ЗАФИКСИРОВАННЫЙ HUD-ПАНЕЛЬ С АВТО-СКРОЛЛОМ
         if cfg_show_hud_stats:
-            calculated_height = 170 + (max(1, len(spectators_list)) * 22)
+            imgui.set_next_window_position(WINDOW_WIDTH - 290, 30, condition=imgui.ALWAYS)
+            imgui.set_next_window_size(270, 260) # РАЗМЕР СТРОГО ОГРАНИЧЕН И НИКОГДА НЕ ВЫРАСТЕТ
             
-            imgui.set_next_window_position(WINDOW_WIDTH - 280, 30, condition=imgui.ALWAYS)
-            imgui.set_next_window_size(260, calculated_height)
-            imgui.begin("HUD_STATUS_PANEL", flags=imgui.WINDOW_NO_TITLE_BAR | imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_BACKGROUND | imgui.WINDOW_NO_INPUTS)
+            # Если меню закрыто — включаем флаг игнорирования кликов мышкой, чтобы не мешать игре
+            hud_flags = imgui.WINDOW_NO_TITLE_BAR | imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_BACKGROUND
+            if not menu_open:
+                hud_flags |= imgui.WINDOW_NO_INPUTS | imgui.WINDOW_NO_SCROLLBAR
+                
+            imgui.begin("HUD_STATUS_PANEL", flags=hud_flags)
             
             dl = imgui.get_window_draw_list()
             pos = imgui.get_window_position()
             size = imgui.get_window_size()
-            dl.add_rect_filled(pos.x, pos.y, pos.x + size.x, pos.y + size.y, imgui.get_color_u32_rgba(0.04, 0.03, 0.03, 0.85), rounding=6.0)
+            dl.add_rect_filled(pos.x, pos.y, pos.x + size.x, pos.y + size.y, imgui.get_color_u32_rgba(0.04, 0.03, 0.03, 0.88), rounding=6.0)
             dl.add_rect(pos.x, pos.y, pos.x + size.x, pos.y + size.y, imgui.get_color_u32_rgba(0.6, 0.0, 0.0, 0.85), rounding=6.0, thickness=1.5)
             
             imgui.set_cursor_pos((14, 12))
-            imgui.text_colored("BLOODHUD OVERLAY", 0.9, 0.0, 0.0, 1.0)
+            imgui.text_colored("BLOODHUD PRO", 0.9, 0.0, 0.0, 1.0)
             imgui.separator()
             
             g_color = [0.0, 1.0, 0.2, 1.0] if game_status == "CONNECTED" else [0.8, 0.1, 0.1, 1.0]
@@ -497,39 +522,35 @@ def main():
             imgui.same_line()
             imgui.text_colored(game_status, *g_color)
             
-            imgui.text("Visuals (ALT): ")
-            imgui.same_line()
-            imgui.text_colored("ACTIVE" if cfg_esp_enabled else "MUTED", *( [0.0, 1.0, 0.2, 1.0] if cfg_esp_enabled else [0.8, 0.1, 0.1, 1.0] ))
-            
-            imgui.text(f"Targets Tracked: {stats['enemies']}")
+            imgui.text(f"Total Observers: {len(spectators_list)}")
             imgui.separator()
             
-            # Общее количество наблюдателей
-            imgui.spacing()
-            imgui.text_colored(f"Total Observers: {len(spectators_list)}", 1.0, 1.0, 1.0, 1.0)
-            imgui.spacing()
-            
-            # Цветовой вывод типов наблюдателей
+            # Внутренний контейнер-скролл для ников (Влезает до 100 человек, размер контейнера залочен на 140px)
+            imgui.begin_child("SpectatorScrollZone", 0, 140, border=False, flags=0)
             if spectators_list:
                 for item in spectators_list:
                     name = item["name"]
                     stype = item["type"]
-                    imgui.set_cursor_pos((14, imgui.get_cursor_pos().y + 1))
+                    is_admin = item["is_admin"]
                     
-                    if stype == "hidden_admin":
-                        # ЯДОВИТО-КРАСНЫЙ ДЛЯ СКРЫТЫХ АДМИНОВ
-                        imgui.text_colored(f"[⚠️ HIDDEN ADMIN] {name}", 1.0, 0.1, 0.1, 1.0)
+                    # Обрезаем сверхдлинные ники, чтобы они не разрывали сетку GUI
+                    clean_name = name if len(name) <= 16 else name[:14] + ".."
+                    imgui.set_cursor_pos((5, imgui.get_cursor_pos().y + 2))
+                    
+                    if is_admin:
+                        imgui.text_colored(f"[!] {clean_name}", 1.0, 0.1, 0.1, 1.0)
                     elif stype == "watching_you":
-                        # ЯРКО-ОРАНЖЕВЫЙ ДЛЯ ТЕХ, КТО СЛЕДИТ КОНКРЕТНО ЗА ТОБОЙ
-                        imgui.text_colored(f"[👁️ WATCHING YOU] {name}", 1.0, 0.6, 0.0, 1.0)
+                        imgui.text_colored(f"[👁️] {clean_name}", 1.0, 0.6, 0.0, 1.0)
                     else:
-                        # СВЕТЛО-СЕРЫЙ ДЛЯ ОБЫЧНЫХ МЕРТВЫХ ИГРОКОВ В НАБЛЮДАТЕЛЯХ
-                        imgui.text_colored(f"[💤 SPECTATOR] {name}", 0.85, 0.85, 0.85, 1.0)
+                        imgui.text_colored(f"[*] {clean_name}", 0.75, 0.75, 0.75, 1.0)
             else:
-                imgui.text_colored("-> No observers detected", 0.4, 0.4, 0.4, 1.0)
+                imgui.set_cursor_pos((5, imgui.get_cursor_pos().y + 6))
+                imgui.text_colored("No active observers", 0.4, 0.4, 0.4, 1.0)
                 
+            imgui.end_child()
             imgui.end()
 
+        # Главное Меню Чита
         if menu_open:
             imgui.set_next_window_position(60, 60, condition=imgui.FIRST_USE_EVER)
             imgui.set_next_window_size(460, 340, condition=imgui.FIRST_USE_EVER)
