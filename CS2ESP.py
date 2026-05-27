@@ -146,70 +146,72 @@ def get_bone_position(pm, bone_array, bone_index):
         return [bx, by, bz]
     except: return None
 
-# АСИНХРОННЫЙ ВЫДЕЛЕННЫЙ ПОТОК ДЛЯ СКАНИРОВАНИЯ НАБЛЮДАТЕЛЕЙ (0% НАГРУЗКИ НА КАРТИНКУ)
 def async_spectator_scanner():
     global spectators_list, pm, client, offsets_loaded
     while True:
-        time.sleep(0.25)  # Опрос 4 раза в секунду — оптимально, точно и без единого фриза
-        if not pm or not offsets_loaded: continue
+        time.sleep(0.1)  # Опрос 10 раз в секунду для моментального выявления
+        if not pm or not client or not offsets_loaded: continue
         
         try:
             local_ctrl = pm.read_longlong(client + dwLocalPlayerController)
-            if not local_ctrl: continue
-            
+            if not local_ctrl:
+                spectators_list = []
+                continue
+                
             local_pawn_handle = pm.read_uint(local_ctrl + m_hPlayerPawn)
-            if not local_pawn_handle or local_pawn_handle == 0xFFFFFFFF: continue
-            local_pawn_slot = local_pawn_handle & 0x7FFF
-            
+            if local_pawn_handle == 0xFFFFFFFF:
+                spectators_list = []
+                continue
+                
             entity_list = pm.read_longlong(client + dwEntityList)
             if not entity_list: continue
             
-            list_entry = pm.read_longlong(entity_list + 16)
-            if not list_entry: continue
+            list_entry_0 = pm.read_longlong(entity_list + 16)
+            if not list_entry_0: continue
             
             temp_specs = []
-            admin_tags = [
-                'ADMIN', 'АДМИН', 'MODER', 'МОДЕР', 'OWNER', 'СОЗДАТЕЛЬ', 'FOUNDER', 
-                '★', '⚡', 'ROOT', 'VIP', 'ГЛ', 'GL', '👑', 'DEV', 'DEVELOPER'
-            ]
+            admin_tags = ['ADMIN', 'АДМИН', 'MODER', 'МОДЕР', 'OWNER', '★', '⚡', 'ROOT', '👑', 'DEV']
 
-            # Сканируем расширенную сетку слотов для полной стабильности на любых серверах
-            for slot in range(1, 128):
+            for slot in range(1, 65):
                 try:
-                    controller = pm.read_longlong(list_entry + 112 * slot)
-                    if not controller: continue
+                    # ИСПРАВЛЕНО: Смещение изменено на 120 байт
+                    controller = pm.read_longlong(list_entry_0 + 120 * slot)
+                    if not controller or controller == local_ctrl: continue
                     
                     team = pm.read_int(controller + m_iTeamNum)
                     pawn_handle = pm.read_uint(controller + m_hPlayerPawn)
                     if pawn_handle == 0xFFFFFFFF: continue
                     
+                    # Чтение очищенного имени игрока
                     s_name = ""
                     if m_sSanitizedPlayerName:
                         name_ptr = pm.read_longlong(controller + m_sSanitizedPlayerName)
                         if name_ptr:
                             name_bytes = pm.read_bytes(name_ptr, 64)
                             s_name = name_bytes.split(b'\x00')[0].decode('utf-8', errors='ignore').strip()
-                    if not s_name: continue
+                    if not s_name: s_name = f"Player_{slot}"
 
                     if any(x['name'] == s_name for x in temp_specs): continue
                     is_admin_by_name = any(tag in s_name.upper() for tag in admin_tags)
 
+                    # Получаем текущую пешку (pawn) мёртвого игрока-наблюдателя
                     pawn_chunk = (pawn_handle & 0x7FFF) >> 9
                     pawn_slot = pawn_handle & 0x1FF
-                    list_entry2 = pm.read_longlong(entity_list + 8 * pawn_chunk + 16)
-                    if not list_entry2: continue
+                    list_entry_pawn = pm.read_longlong(entity_list + 8 * pawn_chunk + 16)
+                    if not list_entry_pawn: continue
                     
-                    entity_pawn = pm.read_longlong(list_entry2 + 112 * pawn_slot)
+                    # ИСПРАВЛЕНО: Смещение изменено на 120 байт
+                    entity_pawn = pm.read_longlong(list_entry_pawn + 120 * pawn_slot)
                     if not entity_pawn: continue
                     
+                    # Проверяем структуру наблюдения
                     if m_pObserverServices and m_hObserverTarget:
                         obs_services = pm.read_longlong(entity_pawn + m_pObserverServices)
                         if obs_services:
                             target_handle = pm.read_uint(obs_services + m_hObserverTarget)
-                            target_pawn_slot = target_handle & 0x7FFF
                             
-                            # Если цель наблюдения совпала с хэндлом твоего павна в клатче
-                            if target_pawn_slot == local_pawn_slot:
+                            # ИСПРАВЛЕНО: Прямое сравнение сетевых хэндлов целей
+                            if target_handle == local_pawn_handle:
                                 temp_specs.append({"name": s_name, "type": "watching_you", "is_admin": is_admin_by_name})
                                 continue
 
@@ -222,7 +224,6 @@ def async_spectator_scanner():
 
 def async_aimbot_processor():
     global pm, client, offsets_loaded, cfg_aim_enabled, cfg_aim_fov, cfg_aim_smooth, cfg_aim_bone, cfg_aim_ignore_visibility, local_idx_global
-    
     while True:
         time.sleep(0.001)  
         if not pm or not offsets_loaded or not cfg_aim_enabled: continue
@@ -245,9 +246,10 @@ def async_aimbot_processor():
             list_entry = pm.read_longlong(entity_list + 16) 
             if not list_entry: continue
             
-            for slot in range(1, 64):
+            for slot in range(1, 65):
                 try:
-                    controller = pm.read_longlong(list_entry + 112 * slot)
+                    # ИСПРАВЛЕНО: Смещение изменено на 120 байт
+                    controller = pm.read_longlong(list_entry + 120 * slot)
                     if not controller: continue
                     
                     team = pm.read_int(controller + m_iTeamNum)
@@ -261,7 +263,8 @@ def async_aimbot_processor():
                     list_entry2 = pm.read_longlong(entity_list + 8 * pawn_chunk + 16)
                     if not list_entry2: continue
                     
-                    entity_pawn = pm.read_longlong(list_entry2 + 112 * pawn_slot)
+                    # ИСПРАВЛЕНО: Смещение изменено на 120 байт
+                    entity_pawn = pm.read_longlong(list_entry2 + 120 * pawn_slot)
                     if not entity_pawn or entity_pawn == local_pawn: continue
                     
                     health = pm.read_int(entity_pawn + m_iHealth)
@@ -315,9 +318,10 @@ def process_visuals_only(draw_list):
         
         list_entry = pm.read_longlong(entity_list + 16)
         if list_entry:
-            for slot in range(1, 64):
+            for slot in range(1, 65):
                 try:
-                    controller = pm.read_longlong(list_entry + 112 * slot)
+                    # ИСПРАВЛЕНО: Смещение изменено на 120 байт
+                    controller = pm.read_longlong(list_entry + 120 * slot)
                     if not controller: continue
                     
                     team = pm.read_int(controller + m_iTeamNum)
@@ -329,7 +333,8 @@ def process_visuals_only(draw_list):
                     list_entry2 = pm.read_longlong(entity_list + 8 * pawn_chunk + 16)
                     if not list_entry2: continue
                     
-                    entity_pawn = pm.read_longlong(list_entry2 + 112 * pawn_slot)
+                    # ИСПРАВЛЕНО: Смещение изменено на 120 байт
+                    entity_pawn = pm.read_longlong(list_entry2 + 120 * pawn_slot)
                     if not entity_pawn or entity_pawn == local_pawn: continue
                     if team not in [2, 3] or team == local_team: continue
                     
@@ -411,7 +416,7 @@ def try_connect_game():
 def main():
     global cfg_esp_enabled, cfg_esp_box, cfg_esp_skeleton, cfg_esp_tracers
     global cfg_aim_enabled, cfg_aim_fov, cfg_aim_smooth, cfg_aim_bone, cfg_aim_ignore_visibility, menu_open, cfg_show_hud_stats
-    global local_idx_global, spectators_list
+    global local_idx_global, spectators_list, stats
 
     if not glfw.init(): return
     glfw.window_hint(glfw.TRANSPARENT_FRAMEBUFFER, glfw.TRUE)
@@ -440,11 +445,9 @@ def main():
     impl = GlfwRenderer(window)
     load_local_offsets()
     
-    # Поток аимбота
     aim_thread = threading.Thread(target=async_aimbot_processor, daemon=True)
     aim_thread.start()
 
-    # Поток улучшенного сканера наблюдателей
     spec_thread = threading.Thread(target=async_spectator_scanner, daemon=True)
     spec_thread.start()
     
@@ -476,13 +479,13 @@ def main():
                 entity_list = pm.read_longlong(client + dwEntityList)
                 list_entry_local = pm.read_longlong(entity_list + 16)
                 if list_entry_local and local_ctrl:
-                    for slot in range(64):
-                        if pm.read_longlong(list_entry_local + 112 * slot) == local_ctrl:
+                    for slot in range(65):
+                        # ИСПРАВЛЕНО: Смещение изменено на 120 байт
+                        if pm.read_longlong(list_entry_local + 120 * slot) == local_ctrl:
                             local_idx_global = slot
                             break
             except: pass
 
-        # Задний холст под ESP
         imgui.set_next_window_size(WINDOW_WIDTH, WINDOW_HEIGHT)
         imgui.set_next_window_position(0, 0)
         imgui.begin("Canvas", flags=imgui.WINDOW_NO_TITLE_BAR | imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_BACKGROUND | imgui.WINDOW_NO_INPUTS)
@@ -495,12 +498,10 @@ def main():
                 imgui.get_window_draw_list().add_circle(SCREEN_CENTER_X, SCREEN_CENTER_Y, fov_pixels, imgui.get_color_u32_rgba(0.6, 0.0, 0.0, 0.25), num_segments=48, thickness=1.2)
         imgui.end()
 
-        # ЖЕСТКО ЗАФИКСИРОВАННЫЙ HUD-ПАНЕЛЬ С АВТО-СКРОЛЛОМ
         if cfg_show_hud_stats:
             imgui.set_next_window_position(WINDOW_WIDTH - 290, 30, condition=imgui.ALWAYS)
-            imgui.set_next_window_size(270, 260) # РАЗМЕР СТРОГО ОГРАНИЧЕН И НИКОГДА НЕ ВЫРАСТЕТ
+            imgui.set_next_window_size(270, 260) 
             
-            # Если меню закрыто — включаем флаг игнорирования кликов мышкой, чтобы не мешать игре
             hud_flags = imgui.WINDOW_NO_TITLE_BAR | imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_BACKGROUND
             if not menu_open:
                 hud_flags |= imgui.WINDOW_NO_INPUTS | imgui.WINDOW_NO_SCROLLBAR
@@ -522,18 +523,17 @@ def main():
             imgui.same_line()
             imgui.text_colored(game_status, *g_color)
             
+            imgui.text(f"ESP Targets: {stats['enemies']} | Vis: {stats['visible']}")
             imgui.text(f"Total Observers: {len(spectators_list)}")
             imgui.separator()
             
-            # Внутренний контейнер-скролл для ников (Влезает до 100 человек, размер контейнера залочен на 140px)
-            imgui.begin_child("SpectatorScrollZone", 0, 140, border=False, flags=0)
+            imgui.begin_child("SpectatorScrollZone", 0, 125, border=False, flags=0)
             if spectators_list:
                 for item in spectators_list:
                     name = item["name"]
                     stype = item["type"]
                     is_admin = item["is_admin"]
                     
-                    # Обрезаем сверхдлинные ники, чтобы они не разрывали сетку GUI
                     clean_name = name if len(name) <= 16 else name[:14] + ".."
                     imgui.set_cursor_pos((5, imgui.get_cursor_pos().y + 2))
                     
@@ -550,7 +550,6 @@ def main():
             imgui.end_child()
             imgui.end()
 
-        # Главное Меню Чита
         if menu_open:
             imgui.set_next_window_position(60, 60, condition=imgui.FIRST_USE_EVER)
             imgui.set_next_window_size(460, 340, condition=imgui.FIRST_USE_EVER)
