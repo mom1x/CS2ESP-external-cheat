@@ -8,6 +8,7 @@ from imgui.integrations.glfw import GlfwRenderer
 import glfw
 import OpenGL.GL as gl
 
+# Инициализация DPI
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(2)
 except:
@@ -19,6 +20,7 @@ WINDOW_HEIGHT = win32api.GetSystemMetrics(1)
 SCREEN_CENTER_X = WINDOW_WIDTH / 2
 SCREEN_CENTER_Y = WINDOW_HEIGHT / 2
 
+# Глобальные смещения
 dwEntityList, dwLocalPlayerPawn, dwViewMatrix, dwLocalPlayerController, dwViewAngles = None, None, None, None, None
 m_iTeamNum, m_hPlayerPawn, m_iHealth, m_vecOrigin, m_pGameSceneNode = None, None, None, None, None
 m_modelState, m_entitySpottedState, m_vecViewOffset = None, None, None
@@ -35,6 +37,7 @@ local_idx_global = -1
 
 menu_open = True            
 cfg_show_hud_stats = True   
+cfg_show_spec_radar = True  # Отдельный тумблер для окна спектаторов
 
 cfg_esp_enabled = True      
 cfg_esp_box = True
@@ -91,11 +94,13 @@ def load_local_offsets():
     global m_modelState, m_entitySpottedState, config_status, offsets_loaded
     global m_pObserverServices, m_hObserverTarget, m_sSanitizedPlayerName
 
+    # Авто-создание папки offsets
+    os.makedirs("offsets", exist_ok=True)
     offsets_path = os.path.join("offsets", "offsets.json")
     client_dll_path = os.path.join("offsets", "client_dll.json")
 
     if not os.path.exists(offsets_path) or not os.path.exists(client_dll_path):
-        config_status = "ERR: JSON MISSING"
+        config_status = "ERR: PLACE FILES IN /OFFSETS/"
         return
 
     try:
@@ -152,17 +157,12 @@ def async_aimbot_processor():
     
     while True:
         time.sleep(0.001)  
-        
-        if not pm or not offsets_loaded or not cfg_aim_enabled:
-            continue
-            
-        if (win32api.GetAsyncKeyState(0x01) & 0x8000) == 0:
-            continue
+        if not pm or not offsets_loaded or not cfg_aim_enabled: continue
+        if (win32api.GetAsyncKeyState(0x01) & 0x8000) == 0: continue
             
         try:
             v_buff = pm.read_bytes(client + dwViewMatrix, 64)
             view_matrix = struct.unpack('16f', v_buff)
-            
             local_pawn = pm.read_longlong(client + dwLocalPlayerPawn)
             if not local_pawn: continue
             
@@ -171,15 +171,13 @@ def async_aimbot_processor():
             if not entity_list: continue
             
             fov_pixels = (cfg_aim_fov * WINDOW_WIDTH) / 180.0
-            
-            best_target_dx = None
-            best_target_dy = None
+            best_target_dx, best_target_dy = None, None
             min_screen_dist = fov_pixels
             
             list_entry = pm.read_longlong(entity_list + 16) 
             if not list_entry: continue
             
-            for slot in range(1, 64):
+            for slot in range(1, 128):
                 try:
                     controller = pm.read_longlong(list_entry + 112 * slot)
                     if not controller: continue
@@ -222,7 +220,6 @@ def async_aimbot_processor():
                             dx = bone_screen[0] - SCREEN_CENTER_X
                             dy = bone_screen[1] - SCREEN_CENTER_Y
                             dist = math.hypot(dx, dy)
-                            
                             if dist < min_screen_dist:
                                 min_screen_dist = dist
                                 best_target_dx = dx
@@ -258,7 +255,6 @@ def process_visuals_and_sync(draw_list):
         current_target_handle = 0
         local_ctrl = None
         
-        # Получаем базовый контроллер локального игрока с фолбеком на индекс
         if dwLocalPlayerController:
             try: local_ctrl = pm.read_longlong(client + dwLocalPlayerController)
             except: pass
@@ -269,7 +265,7 @@ def process_visuals_and_sync(draw_list):
         if local_ctrl:
             current_target_handle = pm.read_uint(local_ctrl + m_hPlayerPawn)
 
-        # Если локальный игрок мертв и сам за кем-то наблюдает (логика для спектаторов)
+        # Спектатор-логика для мёртвого игрока
         if m_pObserverServices and m_hObserverTarget:
             try:
                 local_obs_services = pm.read_longlong(local_pawn + m_pObserverServices)
@@ -279,7 +275,7 @@ def process_visuals_and_sync(draw_list):
                         current_target_handle = local_target
             except: pass
 
-        # Сканируем до 256 сущностей (для поддержки пабликов)
+        # Полный скан до 256 сущностей на пабликах
         for slot in range(1, 256):
             try:
                 controller = pm.read_longlong(list_entry + 112 * slot)
@@ -296,29 +292,28 @@ def process_visuals_and_sync(draw_list):
                 entity_pawn = pm.read_longlong(list_entry2 + 112 * pawn_slot)
                 if not entity_pawn: continue
 
-                # Поиск активных наблюдателей за целевым хэндлом игрока (работает ВСЕГДА)
+                # ФИКС ЧТЕНИЯ НИКОВ НАБЛЮДАТЕЛЕЙ
                 if current_target_handle and m_pObserverServices and m_hObserverTarget:
                     try:
                         obs_services = pm.read_longlong(entity_pawn + m_pObserverServices)
                         if obs_services:
                             target_handle = pm.read_uint(obs_services + m_hObserverTarget)
                             if target_handle == current_target_handle and entity_pawn != local_pawn:
-                                name_ptr = pm.read_longlong(controller + m_sSanitizedPlayerName)
-                                if name_ptr:
-                                    name_bytes = pm.read_bytes(name_ptr, 64)
-                                    s_name = name_bytes.split(b'\x00')[0].decode('utf-8', errors='ignore')
-                                else:
-                                    s_name = f"Player ({slot})"
+                                # Читаем массив байт прямо из структуры контроллера (ФИКС!)
+                                name_address = controller + m_sSanitizedPlayerName
+                                name_bytes = pm.read_bytes(name_address, 64)
+                                s_name = name_bytes.split(b'\x00')[0].decode('utf-8', errors='ignore').strip()
+                                
+                                if not s_name:
+                                    s_name = f"Player_Slot_{slot}"
                                     
                                 if s_name and s_name not in current_spectators:
                                     current_spectators.append(s_name)
                     except: pass
 
-                # Если ВХ отключен кнопкой ALT, то отрисовку оверлея пропускаем, но спектаторов выше собрали!
-                if not cfg_esp_enabled:
-                    continue
-
-                if slot > 64: continue
+                # Логика отрисовки ESP
+                if not cfg_esp_enabled: continue
+                if slot > 128: continue 
                 if entity_pawn == local_pawn: continue
                 
                 team = pm.read_int(controller + m_iTeamNum)
@@ -381,8 +376,7 @@ def process_visuals_and_sync(draw_list):
             except: continue
     except: pass
     
-    if cfg_esp_enabled:
-        stats = current_stats
+    if cfg_esp_enabled: stats = current_stats
     spectators_list = current_spectators
 
 def try_connect_game():
@@ -405,7 +399,7 @@ def try_connect_game():
 
 def main():
     global cfg_esp_enabled, cfg_esp_box, cfg_esp_skeleton, cfg_esp_tracers
-    global cfg_aim_enabled, cfg_aim_fov, cfg_aim_smooth, cfg_aim_bone, cfg_aim_ignore_visibility, menu_open, cfg_show_hud_stats
+    global cfg_aim_enabled, cfg_aim_fov, cfg_aim_smooth, cfg_aim_bone, cfg_aim_ignore_visibility, menu_open, cfg_show_hud_stats, cfg_show_spec_radar
     global local_idx_global, spectators_list
 
     if not glfw.init(): return
@@ -437,27 +431,25 @@ def main():
     aim_thread = threading.Thread(target=async_aimbot_processor, daemon=True)
     aim_thread.start()
     
-    last_check = 0
-    last_local_idx_check = 0
+    last_check, last_local_idx_check = 0, 0
 
     while not glfw.window_should_close(window):
         glfw.poll_events()
         impl.process_inputs()
         imgui.new_frame()
         
+        # Хоткеи управления
         if win32api.GetAsyncKeyState(win32con.VK_F5) & 1:
             menu_open = not menu_open
             update_window_input_state(hwnd, menu_open)
-            if not menu_open:
-                force_focus_game()
+            if not menu_open: force_focus_game()
 
         if win32api.GetAsyncKeyState(win32con.VK_F6) & 1:
             cfg_show_hud_stats = not cfg_show_hud_stats
 
         if win32api.GetAsyncKeyState(win32con.VK_F7) & 1:
-            cfg_aim_enabled = not cfg_aim_enabled
+            cfg_show_spec_radar = not cfg_show_spec_radar
 
-        # Переключение ВХ на кнопку ALT (VK_MENU)
         if win32api.GetAsyncKeyState(win32con.VK_MENU) & 1:
             cfg_esp_enabled = not cfg_esp_enabled
 
@@ -472,17 +464,17 @@ def main():
                 entity_list = pm.read_longlong(client + dwEntityList)
                 list_entry_local = pm.read_longlong(entity_list + 16)
                 if list_entry_local and local_ctrl:
-                    for slot in range(64):
+                    for slot in range(128):
                         if pm.read_longlong(list_entry_local + 112 * slot) == local_ctrl:
                             local_idx_global = slot
                             break
             except: pass
 
+        # Отрисовка холста под ESP
         imgui.set_next_window_size(WINDOW_WIDTH, WINDOW_HEIGHT)
         imgui.set_next_window_position(0, 0)
         imgui.begin("Canvas", flags=imgui.WINDOW_NO_TITLE_BAR | imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_BACKGROUND | imgui.WINDOW_NO_INPUTS)
-        
-        imgui.get_window_draw_list().add_text(15, WINDOW_HEIGHT - 45, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 0.4), "[F5] Menu  |  [F6] HUD Widgets  |  [F7] Toggle Aim  |  [ALT] Toggle ESP")
+        imgui.get_window_draw_list().add_text(15, WINDOW_HEIGHT - 45, imgui.get_color_u32_rgba(1.0, 1.0, 1.0, 0.4), "[F5] Menu  |  [F6] HUD Widget  |  [F7] Spec Radar  |  [ALT] Toggle ESP")
         
         if offsets_loaded and pm: 
             process_visuals_and_sync(imgui.get_window_draw_list())
@@ -491,65 +483,64 @@ def main():
                 imgui.get_window_draw_list().add_circle(SCREEN_CENTER_X, SCREEN_CENTER_Y, fov_pixels, imgui.get_color_u32_rgba(0.6, 0.0, 0.0, 0.25), num_segments=48, thickness=1.2)
         imgui.end()
 
+        # Левый системный HUD
         if cfg_show_hud_stats:
-            imgui.set_next_window_position(WINDOW_WIDTH - 240, 30, condition=imgui.ALWAYS)
-            imgui.set_next_window_size(220, 150)
+            imgui.set_next_window_position(20, 40, condition=imgui.ALWAYS)
+            imgui.set_next_window_size(220, 135)
             imgui.begin("HUD_STATUS_PANEL", flags=imgui.WINDOW_NO_TITLE_BAR | imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_BACKGROUND | imgui.WINDOW_NO_INPUTS)
-            
             dl = imgui.get_window_draw_list()
-            pos = imgui.get_window_position()
-            size = imgui.get_window_size()
+            pos, size = imgui.get_window_position(), imgui.get_window_size()
             dl.add_rect_filled(pos.x, pos.y, pos.x + size.x, pos.y + size.y, imgui.get_color_u32_rgba(0.04, 0.03, 0.03, 0.8), rounding=5.0)
             dl.add_rect(pos.x, pos.y, pos.x + size.x, pos.y + size.y, imgui.get_color_u32_rgba(0.6, 0.0, 0.0, 0.75), rounding=5.0, thickness=1.5)
-            
             imgui.set_cursor_pos((12, 10))
             imgui.text_colored("BLOODHUD SYSTEM", 0.9, 0.0, 0.0, 1.0)
             imgui.separator()
-            
-            g_color = [0.0, 1.0, 0.2, 1.0] if game_status == "CONNECTED" else [0.8, 0.1, 0.1, 1.0]
-            imgui.text("Link Status: ")
-            imgui.same_line()
-            imgui.text_colored(game_status, *g_color)
-            
-            esp_stat_color = [0.0, 1.0, 0.2, 1.0] if cfg_esp_enabled else [0.8, 0.1, 0.1, 1.0]
-            imgui.text("Visuals (ALT): ")
-            imgui.same_line()
-            imgui.text_colored("ACTIVE" if cfg_esp_enabled else "MUTED", *esp_stat_color)
-            
-            a_color = [0.0, 1.0, 0.2, 1.0] if cfg_aim_enabled else [0.5, 0.5, 0.5, 1.0]
-            imgui.text("Aimbot Logic: ")
-            imgui.same_line()
-            imgui.text_colored("MOUSE SIM" if cfg_aim_enabled else "MUTED", *a_color)
-            
+            imgui.text("Link Status: "); imgui.same_line(); imgui.text_colored(game_status, *( [0.0, 1.0, 0.2, 1.0] if game_status == "CONNECTED" else [0.8, 0.1, 0.1, 1.0]))
+            imgui.text("Visuals (ALT): "); imgui.same_line(); imgui.text_colored("ACTIVE" if cfg_esp_enabled else "MUTED", *([0.0, 1.0, 0.2, 1.0] if cfg_esp_enabled else [0.8, 0.1, 0.1, 1.0]))
             imgui.text(f"Targets Tracked: {stats['enemies'] if cfg_esp_enabled else 0}")
             imgui.end()
 
-            # HUD Панель Наблюдателей
-            if spectators_list:
-                imgui.set_next_window_position(WINDOW_WIDTH - 240, 195, condition=imgui.ALWAYS)
-                imgui.set_next_window_size(220, 35 + len(spectators_list) * 20)
-                imgui.begin("HUD_SPEC_PANEL", flags=imgui.WINDOW_NO_TITLE_BAR | imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_BACKGROUND | imgui.WINDOW_NO_INPUTS)
-                
-                sdl = imgui.get_window_draw_list()
-                spos = imgui.get_window_position()
-                ssize = imgui.get_window_size()
-                sdl.add_rect_filled(spos.x, spos.y, spos.x + ssize.x, spos.y + ssize.y, imgui.get_color_u32_rgba(0.04, 0.03, 0.03, 0.85), rounding=5.0)
-                sdl.add_rect(spos.x, spos.y, spos.x + ssize.x, spos.y + ssize.y, imgui.get_color_u32_rgba(0.8, 0.0, 0.0, 0.85), rounding=5.0, thickness=1.5)
-                
-                imgui.set_cursor_pos((12, 8))
-                imgui.text_colored("WATCHING TARGET:", 1.0, 0.1, 0.1, 1.0)
-                imgui.separator()
-                
-                for spec_name in spectators_list:
-                    imgui.set_cursor_pos((12, imgui.get_cursor_pos().y + 2))
-                    imgui.text_colored(f"👁 {spec_name}", 0.95, 0.95, 0.95, 1.0)
-                imgui.end()
-
-        if menu_open:
-            imgui.set_next_window_position(60, 60, condition=imgui.FIRST_USE_EVER)
-            imgui.set_next_window_size(460, 340, condition=imgui.FIRST_USE_EVER)
-            imgui.begin("BLOODWARE // MULTIHACK V2", flags=imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_COLLAPSE)
+        # ОТДЕЛЬНОЕ ПРОДУМАННОЕ GUI ОКНО СПЕКТАТОРОВ СПРАВО
+        if cfg_show_spec_radar:
+            # Считаем динамическую высоту окна в зависимости от кол-ва наблюдателей
+            radar_height = max(75, 45 + len(spectators_list) * 22)
+            imgui.set_next_window_position(WINDOW_WIDTH - 280, 40, condition=imgui.ALWAYS)
+            imgui.set_next_window_size(260, radar_height)
             
+            # Если меню закрыто — убираем инпуты (окно становится кликабельным насквозь)
+            radar_flags = imgui.WINDOW_NO_TITLE_BAR | imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_BACKGROUND
+            if not menu_open:
+                radar_flags |= imgui.WINDOW_NO_INPUTS
+
+            imgui.begin("SPECGUARD_RADAR", flags=radar_flags)
+            rdl = imgui.get_window_draw_list()
+            rpos, rsize = imgui.get_window_position(), imgui.get_window_size()
+            
+            # Фон и рамка
+            rdl.add_rect_filled(rpos.x, rpos.y, rpos.x + rsize.x, rpos.y + rsize.y, imgui.get_color_u32_rgba(0.04, 0.03, 0.03, 0.85), rounding=6.0)
+            rdl.add_rect(rpos.x, rpos.y, rpos.x + rsize.x, rpos.y + rsize.y, imgui.get_color_u32_rgba(0.8, 0.0, 0.0, 0.9), rounding=6.0, thickness=1.5)
+            
+            imgui.set_cursor_pos((15, 10))
+            imgui.text_colored("SPECGUARD // RADAR", 1.0, 0.0, 0.0, 1.0)
+            imgui.separator()
+            
+            if not spectators_list:
+                imgui.set_cursor_pos((15, imgui.get_cursor_pos().y + 8))
+                imgui.text_colored("[ CLEAN ] No Observers", 0.4, 0.4, 0.4, 1.0)
+            else:
+                for spec_name in spectators_list:
+                    imgui.set_cursor_pos((15, imgui.get_cursor_pos().y + 4))
+                    # Яркий значок глаза для привлечения внимания
+                    imgui.text_colored(" 👁  ", 1.0, 0.1, 0.1, 1.0)
+                    imgui.same_line()
+                    imgui.text_colored(spec_name, 0.95, 0.95, 0.95, 1.0)
+            imgui.end()
+
+        # Главная Панель Настроек (F5)
+        if menu_open:
+            imgui.set_next_window_position(300, 200, condition=imgui.FIRST_USE_EVER)
+            imgui.set_next_window_size(480, 350, condition=imgui.FIRST_USE_EVER)
+            imgui.begin("BLOODWARE // MULTIHACK V2", flags=imgui.WINDOW_NO_RESIZE | imgui.WINDOW_NO_COLLAPSE)
             imgui.text(f"Status: {game_status} | Config: {config_status}")
             imgui.separator()
 
@@ -566,27 +557,28 @@ def main():
                 if imgui.begin_tab_item("AIMBOT")[0]:
                     imgui.spacing()
                     _, cfg_aim_enabled = imgui.checkbox("Enable Mouse Aimbot", cfg_aim_enabled)
-                    _, cfg_aim_ignore_visibility = imgui.checkbox("Ignore Visibility (For Deathmatch)", cfg_aim_ignore_visibility)
+                    _, cfg_aim_ignore_visibility = imgui.checkbox("Ignore Visibility", cfg_aim_ignore_visibility)
                     imgui.separator()
-                    
                     _, cfg_aim_fov = imgui.slider_float("FOV Radius", cfg_aim_fov, 1.0, 45.0, "%.1f deg")
-                    _, cfg_aim_smooth = imgui.slider_float("Smoothing (Lower = Faster)", cfg_aim_smooth, 1.0, 25.0, "%.1f")
-                    
+                    _, cfg_aim_smooth = imgui.slider_float("Smoothing", cfg_aim_smooth, 1.0, 25.0, "%.1f")
                     imgui.spacing()
-                    imgui.text("Target Bone Position:")
+                    imgui.text("Target Bone:")
                     if imgui.radio_button("Head (Bone 6)", cfg_aim_bone == 6): cfg_aim_bone = 6
                     imgui.same_line()
                     if imgui.radio_button("Neck (Bone 5)", cfg_aim_bone == 5): cfg_aim_bone = 5
-                    imgui.same_line()
-                    if imgui.radio_button("Chest (Bone 4)", cfg_aim_bone == 4): cfg_aim_bone = 4
+                    imgui.end_tab_item()
+                    
+                if imgui.begin_tab_item("HUD / WINDOWS")[0]:
+                    imgui.spacing()
+                    _, cfg_show_hud_stats = imgui.checkbox("Show Left Info HUD", cfg_show_hud_stats)
+                    _, cfg_show_spec_radar = imgui.checkbox("Show Right Spectator Radar (F7)", cfg_show_spec_radar)
                     imgui.end_tab_item()
             imgui.end_tab_bar()
             imgui.end()
 
-        imgui.end_frame()
+        imgui.render()
         gl.glClearColor(0, 0, 0, 0)
         gl.glClear(gl.GL_COLOR_BUFFER_BIT)
-        imgui.render()
         impl.render(imgui.get_draw_data())
         glfw.swap_buffers(window)
 
